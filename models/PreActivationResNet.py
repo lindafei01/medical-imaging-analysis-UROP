@@ -6,48 +6,20 @@ import math
 from functools import partial
 import numpy as np
 
-
+__all__ = ['PreActivationResNet', 'PreActivationResNet18', 'PreActivationResNet34', 'PreActivationResNet50',
+           'PreActivationResNet101', 'PreActivationResNet152', 'PreActivationResNet200']
 
 
 def conv3x3x3(in_planes, out_planes, stride=1):
     # 3x3x3 convolution with padding
-    return nn.Conv3d(
-        in_planes,
-        out_planes,
-        kernel_size=3,
-        stride=stride,
-        padding=1,
-        bias=False)
-
-
-class SELayer(nn.Module):
-    '''
-    https://github.com/moskomule/senet.pytorch
-    Modified
-    '''
-
-    def __init__(self, channel, reduction=16):
-        super(SELayer, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool3d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channel, channel // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channel // reduction, channel, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1, 1)
-        return x * y.expand_as(x)
-
+    return nn.Conv3d(in_planes, out_planes, kernel_size=3,
+                     stride=stride, padding=1, bias=False)
 
 def downsample_basic_block(x, planes, stride):
     out = F.avg_pool3d(x, kernel_size=1, stride=stride)
-    zero_pads = torch.Tensor(
-        out.size(0), planes - out.size(1), out.size(2), out.size(3),
-        out.size(4)).zero_()
+    zero_pads = torch.Tensor(out.size(0), planes - out.size(1),
+                             out.size(2), out.size(3),
+                             out.size(4)).zero_()
     if isinstance(out.data, torch.cuda.FloatTensor):
         zero_pads = zero_pads.cuda()
 
@@ -56,87 +28,50 @@ def downsample_basic_block(x, planes, stride):
     return out
 
 
-class BasicBlock(nn.Module):
+class PreActivationBasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(BasicBlock, self).__init__()
+        super(PreActivationBasicBlock, self).__init__()
+        self.bn1 = nn.BatchNorm3d(inplanes)
         self.conv1 = conv3x3x3(inplanes, planes, stride)
-        self.bn1 = nn.BatchNorm3d(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3x3(planes, planes)
         self.bn2 = nn.BatchNorm3d(planes)
+        self.conv2 = conv3x3x3(planes, planes)
+        self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
 
     def forward(self, x):
         residual = x
 
-        out = self.conv1(x)
-        out = self.bn1(out)
+        out = self.bn1(x)
         out = self.relu(out)
+        out = self.conv1(out)
 
-        out = self.conv2(out)
         out = self.bn2(out)
+        out = self.relu(out)
+        out = self.conv2(out)
 
         if self.downsample is not None:
             residual = self.downsample(x)
 
         out += residual
-        out = self.relu(out)
 
         return out
 
 
-class SEBasicBlock(nn.Module):
-    expansion = 1
-
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(SEBasicBlock, self).__init__()
-        self.conv1 = conv3x3x3(inplanes, planes, stride)
-        self.bn1 = nn.BatchNorm3d(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3x3(planes, planes)
-        self.bn2 = nn.BatchNorm3d(planes)
-        self.downsample = downsample
-        self.stride = stride
-        self.se = SELayer(planes)
-
-    def forward(self, x):
-        residual = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        out = self.se(out)
-
-        if self.downsample is not None:
-            residual = self.downsample(x)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class Bottleneck(nn.Module):
-    # TODO: temperately use group conv
+class PreActivationBottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(Bottleneck, self).__init__()
+        super(PreActivationBottleneck, self).__init__()
+        self.bn1 = nn.BatchNorm3d(inplanes)
         self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm3d(planes)
-        # TODO(20201117): temperately use group conv
-        self.conv2 = nn.Conv3d(
-            planes, planes, kernel_size=3, stride=stride, padding=1, bias=False, groups=32)
         self.bn2 = nn.BatchNorm3d(planes)
+        self.conv2 = nn.Conv3d(planes, planes, kernel_size=3, stride=stride,
+                               padding=1, bias=False)
+        self.bn3 = nn.BatchNorm3d(planes)
         self.conv3 = nn.Conv3d(planes, planes * 4, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm3d(planes * 4)
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
@@ -144,96 +79,73 @@ class Bottleneck(nn.Module):
     def forward(self, x):
         residual = x
 
-        out = self.conv1(x)
-        out = self.bn1(out)
+        out = self.bn1(x)
         out = self.relu(out)
+        out = self.conv1(out)
 
-        out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
+        out = self.conv2(out)
 
-        out = self.conv3(out)
         out = self.bn3(out)
+        out = self.relu(out)
+        out = self.conv3(out)
 
         if self.downsample is not None:
             residual = self.downsample(x)
 
         out += residual
-        out = self.relu(out)
 
         return out
 
 
-class ResNet(nn.Module):
-    # modified by Zichao: for applying to MRI.
-    # 1. Same stride for 3 dim because of
-    # 2. input channel of conv1 to be 1
-    # 3. return extra output for compatibility reason
-    # 4. add sigmoid for fc
-    # 5. allow layer==0
-    # 6. allow modify channels
-    def __init__(self,
-                 block,
-                 layers,
-                 sample_size=(121, 145, 121),
-                 shortcut_type='B',
-                 num_classes=400,
-                 channels=(64, 128, 256, 512),
-                 federated = None):
-        self.inplanes = channels[0]
-        self.num_classes = num_classes
-        super(ResNet, self).__init__()
+class PreActivationResNet(nn.Module):
+
+    def __init__(self, block, layers, sample_size1, sample_size2, sample_duration, shortcut_type='B', num_classes=400,
+                 last_fc=True):
+
+        self.last_fc = last_fc
+
+        self.inplanes = 64
+        super(PreActivationResNet, self).__init__()
         self.criterion = nn.BCELoss()
-        self.conv1 = nn.Conv3d(
-            1,
-            channels[0],
-            kernel_size=7,
-            stride=(2, 2, 2),
-            padding=(3, 3, 3),
-            bias=False)
-        self.bn1 = nn.BatchNorm3d(channels[0])
+        self.conv1 = nn.Conv3d(1, 64, kernel_size=7, stride=(1, 2, 2),
+                               padding=(3, 3, 3), bias=False)
+        self.bn1 = nn.BatchNorm3d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool3d(kernel_size=(3, 3, 3), stride=2, padding=1)
-        self.layer1 = self._make_layer(block, channels[0], layers[0], shortcut_type)
-        self.layer2 = self._make_layer(
-            block, channels[1], layers[1], shortcut_type, stride=2)
-        self.layer3 = self._make_layer(
-            block, channels[2], layers[2], shortcut_type, stride=2)
-        self.layer4 = self._make_layer(
-            block, channels[3], layers[3], shortcut_type, stride=2)
-
-        last_size = [int(math.ceil(i / 2 ** ((np.array(layers) > 0).sum() + 1))) for i in sample_size]
-        self.avgpool = nn.AvgPool3d(
-            (last_size[0], last_size[1], last_size[2]), stride=1)
-        # self.fc = nn.Linear(512 * block.expansion, num_classes)
-        fc_size = channels[np.where(np.array(layers) > 0)[0][-1]]
-        self.fc = nn.Sequential(nn.Linear(fc_size * block.expansion, num_classes))
+        self.layer1 = self._make_layer(block, 64, layers[0], shortcut_type)
+        self.layer2 = self._make_layer(block, 128, layers[1], shortcut_type, stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], shortcut_type, stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], shortcut_type, stride=2)
+        self.num_classes=num_classes
+        last_duration = math.ceil(sample_duration / 16)
+        last_size1 = math.ceil(sample_size1 / 32)
+        last_size2 = math.ceil(sample_size2 / 32)
+        self.avgpool = nn.AvgPool3d((last_duration, last_size1, last_size2), stride=1)
+        self.fc = nn.Sequential(nn.Linear(512 * block.expansion, num_classes))
 
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
-                m.weight = nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
             elif isinstance(m, nn.BatchNorm3d):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
     def _make_layer(self, block, planes, blocks, shortcut_type, stride=1):
-        if blocks < 1:
-            return nn.Sequential()
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             if shortcut_type == 'A':
-                downsample = partial(
-                    downsample_basic_block,
-                    planes=planes * block.expansion,
-                    stride=stride)
+                downsample = partial(downsample_basic_block,
+                                     planes=planes * block.expansion,
+                                     stride=stride)
             else:
                 downsample = nn.Sequential(
-                    nn.Conv3d(
-                        self.inplanes,
-                        planes * block.expansion,
-                        kernel_size=1,
-                        stride=stride,
-                        bias=False), nn.BatchNorm3d(planes * block.expansion))
+                    nn.Conv3d(self.inplanes, planes * block.expansion,
+                              kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm3d(planes * block.expansion)
+                )
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample))
@@ -248,30 +160,23 @@ class ResNet(nn.Module):
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
+
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+
         x = self.avgpool(x)
+
         x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        if self.last_fc:
+            x = self.fc(x)
         if self.num_classes == 1:
             x = torch.sigmoid(x)
         else:
             x = torch.log_softmax(x, dim=1)
-        return x, #torch.zeros(x.shape, dtype=x.dtype, device=x.device)
-
-    def embedding(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        x = self.avgpool(x)
-        return x.view(x.size(0), -1)
+        # print(type(x))
+        return x,
 
     def fit(self, train_loader, optimizer, device, dtype):
         losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
@@ -285,8 +190,16 @@ class ResNet(nn.Module):
             outputs = self(inputs)
 
             for i in range(labels.shape[1]):
+                # print(outputs)
+                # print(labels)
+                # print(labels.shape) #[16,1,1]
+                # print(labels[:,i,:]) #[16,1]
+                # print(outputs[i])
+                # print(labels[:,i,:].shape)
                 assert outputs[i].shape == labels[:, i, :].shape
-                non_nan = ~torch.isnan(labels[:, i, :])
+                non_nan = ~torch.isnan(labels[:, i, :]) #True[16,1]
+                # print(outputs[i][non_nan])
+                # print(labels[:,i,:][non_nan])
                 if non_nan.any():
                     loss = self.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
                     loss.backward(retain_graph=True)
@@ -376,7 +289,7 @@ def get_fine_tuning_parameters(model, ft_begin_index):
 
     ft_module_names = []
     for i in range(ft_begin_index, 5):
-        ft_module_names.append('layer{}'.format(i))
+        ft_module_names.append('layer{}'.format(ft_begin_index))
     ft_module_names.append('fc')
 
     parameters = []
@@ -390,38 +303,39 @@ def get_fine_tuning_parameters(model, ft_begin_index):
 
     return parameters
 
-
-
-def resnet18(**kwargs):
+def PreActivationResNet18(**kwargs):
     """Constructs a ResNet-18 model.
     """
-    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    model = PreActivationResNet(PreActivationBasicBlock, [2, 2, 2, 2], **kwargs)
     return model
 
-
-def resnet34(**kwargs):
+def PreActivationResNet34(**kwargs):
     """Constructs a ResNet-34 model.
     """
-    model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+    model = PreActivationResNet(PreActivationBasicBlock, [3, 4, 6, 3], **kwargs)
     return model
 
 
-def resnet50(**kwargs):
+def PreActivationResNet50(**kwargs):
     """Constructs a ResNet-50 model.
     """
-    model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+    model = PreActivationResNet(PreActivationBottleneck, [3, 4, 6, 3], **kwargs)
     return model
 
-
-def resnet101(**kwargs):
+def PreActivationResNet101(**kwargs):
     """Constructs a ResNet-101 model.
     """
-    model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
+    model = PreActivationResNet(PreActivationBottleneck, [3, 4, 23, 3], **kwargs)
     return model
 
+def PreActivationResNet152(**kwargs):
+    """Constructs a ResNet-101 model.
+    """
+    model = PreActivationResNet(PreActivationBottleneck, [3, 8, 36, 3], **kwargs)
+    return model
 
-
-if __name__ == "__main__":
-    i = torch.rand([2, 50, 1, 25, 25, 25], device='cpu', dtype=torch.float32)
-    net = ResNet(BasicBlock, [1, 2, 2, 1], num_classes=1)
-    o = net(i)
+def PreActivationResNet200(**kwargs):
+    """Constructs a ResNet-101 model.
+    """
+    model = PreActivationResNet(PreActivationBottleneck, [3, 24, 36, 3], **kwargs)
+    return model

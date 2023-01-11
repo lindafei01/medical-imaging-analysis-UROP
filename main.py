@@ -1,18 +1,21 @@
 import sys
 import os
-os.environ['MKL_THREADING_LAYER'] = 'GNU'
 import logging
 import numpy as np
 import torch
 from utils.utils import occumpy_mem, mk_dirs, get_models
 from utils.datasets import get_dataset
 from utils.training import train, predict
-from utils.opts import parse_opts, mod_opt, BASEDIR, DATASEED, federated_opt
+from utils.opts import parse_opts, mod_opt, BASEDIR, DATASEED, federated_opt, dp_opt
 from utils.landmarks import get_landmarks
 from utils.parasearch import gen_paras
+from utils.federated_training import train_federated
+from utils.federated_datasets import get_dataset_federated
+from utils.federated_withDP_opacus import train_federated_dp
+import warnings
+warnings.filterwarnings("ignore")
 
 logging.basicConfig(level='WARNING')
-
 if __name__ == "__main__":
     opt = parse_opts()
     logging.info("%s" % opt)
@@ -32,6 +35,8 @@ if __name__ == "__main__":
         opt = federated_opt(opt)
         if opt.federated_para:
             opt.federated_setting.update(eval(opt.federated_para))
+    if opt.withDP:
+        opt = dp_opt(opt)
 
     ## generate landmarks
     if opt.gen_lmk:
@@ -41,19 +46,37 @@ if __name__ == "__main__":
 
     ## generate datasets
     print('Training Dataset: ', opt.dataset)
-    dataloader_list,train_user_groups, val_user_groups = get_dataset(dataset=opt.dataset,
+    if opt.federated:
+        data_list, train_user_groups, val_user_groups = get_dataset_federated(dataset=opt.dataset,
+                                                                          clfsetting=opt.clfsetting, modals=opt.modals,
+                                                                          patch_size=opt.patch_size, batch_size=opt.batch_size,
+                                                                          center_mat=opt.center_mat, flip_axises=opt.flip_axises,
+                                                                          no_smooth=opt.no_smooth, no_shuffle=opt.no_shuffle,
+                                                                          no_shift=opt.no_shift, n_threads=opt.n_threads, seed=DATASEED,
+                                                                          resample_patch=opt.resample_patch, trtype=opt.trtype,
+                                                                          federated_setting=opt.federated_setting)
+    else:
+        dataloader_list,train_user_groups, val_user_groups = get_dataset(dataset=opt.dataset,
                                   clfsetting=opt.clfsetting, modals=opt.modals,
                                   patch_size=opt.patch_size, batch_size=opt.batch_size,
                                   center_mat=opt.center_mat, flip_axises=opt.flip_axises,
                                   no_smooth=opt.no_smooth, no_shuffle=opt.no_shuffle, no_shift=opt.no_shift,
                                   n_threads=opt.n_threads, seed=DATASEED, resample_patch=opt.resample_patch,
-                                  trtype=opt.trtype, federated_setting=opt.federated_setting)
-                                #if trtype== 'single': [[data_train, data_val, data_test]]
-                                #elif trtype == '5-rep':[[data_train, data_val, data_test] for i in range(5)]
+                                  trtype=opt.trtype)
+
+
 
     # get models
-    pretrain_paths = [opt.pretrain_path for i in range(len(dataloader_list))]#default:None
-    models = get_models(opt.method, opt.method_setting, opt.trtype, pretrain_paths=pretrain_paths, device=device,federated=opt.federated)
+    if opt.federated:
+        pretrain_paths = [opt.pretrain_path for i in range(len(data_list))]
+    else:
+        pretrain_paths = [opt.pretrain_path for i in range(len(dataloader_list))]#default:None
+    models = get_models(opt.method, opt.method_setting, opt.trtype, pretrain_paths=pretrain_paths, device=device, federated=opt.federated)
+    # if opt.withDP:
+    #     for item in models:
+    #         new_model = ModuleValidator.fix(item)
+    #         models.append(new_model)
+    #         models.remove(item)
 
     if opt.para_search:
         # TODO: for the grid search of hyper-parameters
@@ -63,7 +86,7 @@ if __name__ == "__main__":
         for paras in gen_paras(opt.method, opt.method_setting):
             models = get_models(opt.method, paras, '5-rep', pretrain_paths=pretrain_paths,
                                 device=device)
-            models, saved_paths = train(models, opt.n_epochs,
+            models, saved_paths = train(models, opt.global_epochs,
                                         dataloader_list,
                                         optimname=opt.optimizer,
                                         learning_rate=opt.learning_rate,
@@ -84,7 +107,31 @@ if __name__ == "__main__":
         saved_paths = best_saved_path
     elif not opt.no_train:
         ## training
-        models, saved_paths = train(models, opt.n_epochs,
+        if opt.withDP:
+            models, saved_paths, dataloader_list = train_federated_dp(models, opt.global_epochs,
+                                    data_list,
+                                    optimname=opt.optimizer,
+                                    learning_rate=opt.learning_rate,
+                                    device=device, logstring=TB_COMMENT,
+                                    no_log=opt.no_log,
+                                    no_val=opt.no_val,
+                                    train_user_groups=train_user_groups,
+                                    val_user_groups=val_user_groups,
+                                    args=opt)
+
+        elif opt.federated:
+            models, saved_paths, dataloader_list = train_federated(models, opt.global_epochs,
+                                    data_list,
+                                    optimname=opt.optimizer,
+                                    learning_rate=opt.learning_rate,
+                                    device=device, logstring=TB_COMMENT,
+                                    no_log=opt.no_log,
+                                    no_val=opt.no_val,
+                                    train_user_groups=train_user_groups,
+                                    val_user_groups=val_user_groups,
+                                    args=opt)
+        else:
+            models, saved_paths = train(models, opt.global_epochs,
                                     dataloader_list,
                                     optimname=opt.optimizer,
                                     learning_rate=opt.learning_rate,
@@ -93,7 +140,7 @@ if __name__ == "__main__":
                                     no_val=opt.no_val,
                                     train_user_groups=train_user_groups,
                                     val_user_groups=val_user_groups,
-                                    federated_setting=opt.federated_setting)
+                                    federated_setting=opt.federated_setting,args=opt)
 
     ## prediction
     result = dict()
@@ -110,6 +157,7 @@ if __name__ == "__main__":
                                           trtype=opt.trtype)
             reduced_result, metric_figlist, metric_strlist = predict(models, dataloader_list, device)
             result[pre_dataset] = reduced_result
+
 
     print('*****************************\r\n')
     print('Testing Result: \r\n %s\r\n' % result)

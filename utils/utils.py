@@ -5,12 +5,15 @@ import logging
 import time
 from subprocess import Popen, PIPE
 from models.resnet import resnet18, resnet34
-from models import LDMIL, DAMIDL, ViT
-from typing import Union
+from models import DAMIDL, ViT
+from models.PreActivationResNet import PreActivationResNet18,PreActivationResNet34
+from models.DenseNet import densenet121
+from models.WideResnet import WideResNet18,WideResNet34
+from models.Multimodal_ResNet import resnet18_multimodal
+import datetime
 
-method_map = {'Res18': resnet18, 'Res34': resnet34, 'LDMIL': LDMIL, 'DAMIDL': DAMIDL,
-              'ViT': ViT}
-
+method_map = {'Res18': resnet18, 'Res34': resnet34, 'DAMIDL': DAMIDL, 'ViT': ViT, 'densenet121':densenet121,'PreActivationResNet18':PreActivationResNet18,
+              'PreActivationResNet34':PreActivationResNet34,'WideResNet18':WideResNet18,'WideResNet34':WideResNet34,'Res18_Multimodal':resnet18_multimodal}
 
 def mk_dirs(basedir):
     dirs = [os.path.join(basedir, 'runs'),
@@ -22,7 +25,7 @@ def mk_dirs(basedir):
         if not os.path.exists(dir):
             os.mkdir(dir)
 
-def get_models(method, method_setting, trtype:str, pretrain_paths: list, device,federated=None):
+def get_models(method, method_setting, trtype: str, pretrain_paths: list, device, federated=None):
     models = []
     Model = method_map[method]
     if trtype == 'single':
@@ -33,13 +36,13 @@ def get_models(method, method_setting, trtype:str, pretrain_paths: list, device,
         raise NotImplementedError
 
     for i in range(num_models):
-        model = Model(**method_setting,federated=federated)
+        model = Model(**method_setting)
         if pretrain_paths[i] is not None:
             model = mf_load_model(model, pretrain_paths[i], device=device)
         models.append(model)
     return models
 
-def mf_save_model(model, path, framework):
+def mf_save_model(model, path, framework='pytorch'):
     if framework == 'pytorch':
         torch.save(model.state_dict(), path)
     elif framework == 'keras':
@@ -48,7 +51,6 @@ def mf_save_model(model, path, framework):
         raise NotImplementedError
 
 def mf_load_model(model, path, framework='pytorch', device='cpu'):
-    # TODO: problematic!!!
     if framework == 'pytorch':
         try:
             model.load_state_dict(torch.load(path, map_location=device), strict=True)
@@ -123,3 +125,31 @@ def parallel_cmd(cmds, num_p):
                 raise Exception(errinfo.decode())
             else:
                 yield output, errinfo
+
+def federated_logging(args, global_epoch, test_result, epsilon_log=None):
+    print(f"\nglobal epoch finished:{global_epoch + 1}\t logging...\n", )
+
+    log_dir_test = '../federated_logs/test_log/'
+    if not os.path.exists(log_dir_test):
+        os.makedirs(log_dir_test)
+
+    if args.withDP:
+        assert epsilon_log
+        exp_name = '_'.join([args.method, 'federated','DP'])
+    else:
+        assert epsilon_log == None
+        exp_name = '_'.join([args.method, 'federated','w\oDP'])
+
+    with open(log_dir_test + exp_name + '_test.txt', 'w') as f:
+        f.write("%s\n" % test_result)
+
+    if epsilon_log:
+        log_dir_eps = '../federated_logs/privacy_log/'
+        if not os.path.exists(log_dir_eps):
+            os.makedirs(log_dir_eps)
+        print("epsilons: max {:.2f},  mean {:.2f}, std {:.2f}\n".format(np.max(epsilon_log[-1]), np.mean(epsilon_log[-1]),
+                                                                      np.std(epsilon_log[-1])))
+
+        with open(log_dir_eps + exp_name + '_eps.txt', 'w') as f:
+            for item in epsilon_log:
+                f.write("%s\n" % item)

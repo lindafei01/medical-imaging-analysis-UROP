@@ -390,6 +390,122 @@ def get_fine_tuning_parameters(model, ft_begin_index):
 
     return parameters
 
+def forward(model, x, kwargs, device):
+    model.num_classes = kwargs['num_classes']
+    x = model.conv1(x)
+    x = model.bn1(x)
+    x = model.relu(x)
+    x = model.maxpool(x)
+    x = model.layer1(x)
+    x = model.layer2(x)
+    x = model.layer3(x)
+    x = model.layer4(x)
+    x = model.avgpool(x)
+    x = x.view(x.size(0), -1)
+    x = model.fc(x)
+    if model.num_classes == 1:
+        x = torch.sigmoid(x)
+    else:
+        x = torch.log_softmax(x, dim=1)
+    return x, #torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+
+def fit(model, train_loader, optimizer, device, kwargs, dtype):
+    losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
+    model.train(True)
+    for n, data in enumerate(train_loader, 0):
+        inputs, aux_labels, labels, dis_label = data
+
+        inputs = inputs.to(device=device, dtype=dtype)
+        labels = labels.to(device=device, dtype=dtype)
+        optimizer.zero_grad()
+        outputs = forward(model,inputs,kwargs,device)
+
+        for i in range(labels.shape[1]):
+            assert outputs[i].shape == labels[:, i, :].shape
+            non_nan = ~torch.isnan(labels[:, i, :])
+            if non_nan.any():
+                loss = model.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
+                loss.backward(retain_graph=True)
+                losses[i] += loss.detach()
+        optimizer.step()
+    return losses / len(train_loader)
+
+def evaluate_data(model, val_loader, device, dtype='float32'):
+    predicts = []
+    groundtruths = []
+    group_labels = []
+
+    with torch.no_grad():
+        model.train(False)
+        for i, data in enumerate(val_loader, 0):
+            inputs, aux_labels, labels, dis_label = data
+            inputs = inputs.to(device=device, dtype=dtype)
+            outputs = forward(model,inputs)
+            predicts.append(outputs)
+            groundtruths.append(labels.numpy())
+            group_labels.append(dis_label)
+
+    _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
+    _probs = _probs.transpose(0, 1).cpu()
+
+    predicts = np.array(
+        [np.concatenate([j[i].cpu().numpy() for j in predicts], axis=0) for i in range(len(predicts[1]))])
+    predicts = predicts.transpose((1, 0, 2))
+    groundtruths = np.concatenate(groundtruths, axis=0)
+    group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
+
+    # for i, standr in enumerate(val_loader.dataset.standrs):
+    #     predicts[:, i, :] = standr.unstandr(predicts[:, i, :])
+    #     groundtruths[:, i, :] = standr.unstandr(groundtruths[:, i, :])
+
+    groundtruths = groundtruths[:, :, -1:]
+    predicts = predicts[:, :, -1:]
+
+    non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(_probs.shape[1])]
+
+    val_loss = sum([model.criterion(_probs[:, i, :][non_nan[i]], torch.from_numpy(groundtruths[:, i, :])[non_nan[i]])
+                    for i in range(_probs.shape[1])])
+
+    return predicts, groundtruths, group_labels, val_loss
+
+def predict_data(model, val_loader, device, dtype='float32'):
+    predicts = []
+    groundtruths = []
+    group_labels = []
+
+    with torch.no_grad():
+        model.train(False)
+        for i, data in enumerate(val_loader, 0):
+            inputs, aux_labels, labels, dis_label = data
+            inputs = inputs.to(device=device, dtype=dtype)
+            outputs = forward(model,inputs)
+            predicts.append(outputs)
+            groundtruths.append(labels.numpy())
+            group_labels.append(dis_label)
+
+    _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
+    _probs = _probs.transpose(0, 1).cpu()
+
+    predicts = np.array(
+        [np.concatenate([j[i].cpu().numpy() for j in predicts], axis=0) for i in range(len(predicts[1]))])
+    predicts = predicts.transpose((1, 0, 2))
+    groundtruths = np.concatenate(groundtruths, axis=0)
+    group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
+
+    # for i, standr in enumerate(val_loader.dataset.standrs):
+    #     predicts[:, i, :] = standr.unstandr(predicts[:, i, :])
+    #     groundtruths[:, i, :] = standr.unstandr(groundtruths[:, i, :])
+
+    groundtruths = groundtruths[:, :, -1:]
+    predicts = predicts[:, :, -1:]
+
+    non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(_probs.shape[1])]
+
+    val_loss = sum([model.criterion(_probs[:, i, :][non_nan[i]], torch.from_numpy(groundtruths[:, i, :])[non_nan[i]])
+                    for i in range(_probs.shape[1])])
+
+    return predicts, groundtruths, group_labels, val_loss
+
 
 
 def resnet18(**kwargs):
@@ -418,10 +534,3 @@ def resnet101(**kwargs):
     """
     model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
     return model
-
-
-
-if __name__ == "__main__":
-    i = torch.rand([2, 50, 1, 25, 25, 25], device='cpu', dtype=torch.float32)
-    net = ResNet(BasicBlock, [1, 2, 2, 1], num_classes=1)
-    o = net(i)

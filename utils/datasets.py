@@ -14,18 +14,16 @@ import pandas as pd
 from scipy import ndimage as nd
 from sklearn.model_selection import train_test_split
 from typing import Union, Tuple, Iterable
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
+import scipy.io
 
+# ABIDE_PATH='/data/datasets/Preprocessing/ABIDE_T1'
+# ATLAS_2_PATH='/data/datasets/Preprocessing/ATLAS_2'
+# MINDS_PATH='/data/datasets/Preprocessing/MINDS'
+# NIFD_PATH='/data/datasets/Preprocessing/NIFD_T1'
+# BraTS_PATH='/data/datasets/Preprocessing/MICCAI_BraTS/MICCAI_BraTS_20'
+from .opts import ADNI_PATH, AIBL_PATH, COBRE_PATH, eQTL_PATH, ZIB_AD_path, ABIDE_T1PATH, ABIDE_FMRIPATH, ATLAS_2_PATH, MINDS_PATH, NIFD_PATH, BraTS_PATH
 
-# TODO: multi-modal
-ADNI_PATH = '/data/datasets/ADNI/ADNI_T1_Fixed_20210719'
-AIBL_PATH = '/data/datasets/AIBL'
-COBRE_PATH = '/data/datasets/COBRE'
-ABIDE_PATH='/data/datasets/Preprocessing/ABIDE_T1'
-ATLAS_2_PATH='/data/datasets/Preprocessing/ATLAS_2'
-MINDS_PATH='/data/datasets/Preprocessing/MINDS'
-NIFD_PATH='/data/datasets/Preprocessing/NIFD_T1'
-BraTS_PATH='/data/datasets/Preprocessing/MICCAI_BraTS/MICCAI_BraTS_20'
 
 def batch_sampling(imgs, labels, center_mat, aux_labels, dis_labels, patch_size=(25, 25, 25), random=False,
                    shift=False, flip_axis=None):
@@ -78,20 +76,6 @@ def batch_sampling(imgs, labels, center_mat, aux_labels, dis_labels, patch_size=
 
     return batch_img, batch_aux_label, batch_label, batch_dis_label
 
-class DatasetSplit(Dataset):
-    """An abstract Dataset class wrapped around Pytorch Dataset class.
-    """
-
-    def __init__(self, dataset, idxs):
-        self.dataset = dataset
-        self.idxs = [int(i) for i in idxs]
-
-    def __len__(self):
-        return len(self.idxs)
-
-    def __getitem__(self, item):
-        return self.dataset[self.idxs[item]]
-
 class Dataset(object):
     def __init__(self, image_path, subset, clfsetting, modals: list, no_smooth=False,
                  only_bl=False, ids_exclude=(), ids_include=(),
@@ -106,12 +90,11 @@ class Dataset(object):
         self.image_path = image_path
         self.smooth = not no_smooth
         self.maskmat = maskmat
+        self.clfsetting = clfsetting
 
-        # get the infomation table
         info = self.get_table(self.image_path, modals, dsettings)
         info['GROUP'] = self.g_mapping(info['DX'].values)
 
-        # the columns that the table should at least contain
         for col in ['DX', 'ID', 'GROUP', 'VISIT'] + modals:
             assert col in info.columns
 
@@ -123,7 +106,7 @@ class Dataset(object):
             info = info[~info['ID'].isin(ids_exclude)]
 
         # entry level selection
-        # info['ID'] = info['ID'].astype(int) # TODO@ZZC(20220721): maybe ID sorting is needed in some cases
+        # info['ID'] = info['ID'].astype(int)
         info['VISIT'] = info['VISIT'].values.astype(int)
         info = info.sort_values('VISIT')
 
@@ -200,8 +183,11 @@ class Dataset(object):
             binary_mapping={np.nan: -1, '': -1, 'nan': -1,
                             'CN': 0, 'NC': 0, 'No_Known_Disorder': 0, 'Control': 0, 'Healthy Control': 0,
                             'sMCI': 1, 'pMCI': 1, 'AD': 1,
-                            'Bipolar_Disorder': 1, 'Bipolar Disorder': 1, 'Schizoaffective': 1, 'Schizophrenia_Strict': 1, 'Schizophrenia': 1, 'Autism': 1,
-                            'HGG': 1, 'LGG': 1, 'unknown Tumor': 1, 'Stroke': 1, 'Major Depressive Disorder': 1, 'FTD': 1}
+                            'Bipolar_Disorder': 1, 'Bipolar Disorder': 1,
+                            'Schizoaffective': 1, 'Schizophrenia_Strict': 1, 'Schizophrenia': 1,
+                            'Autism': 1,
+                            'HGG': 1, 'LGG': 1, 'unknown Tumor': 1,
+                            'Stroke': 1, 'Major Depressive Disorder': 1, 'FTD': 1}
             labels = map(lambda x: binary_mapping[x], dx)
             labels = np.array(list(labels), dtype=int)
 
@@ -248,8 +234,12 @@ class Dataset(object):
         dis_map = {np.nan: -1, '': -1, 'nan': -1,
                    'CN': 0, 'NC': 0, 'No_Known_Disorder': 0,'Control':0,'Healthy Control':0,
                    'sMCI': 1, 'pMCI': 2, 'AD': 3,
-                   'Bipolar_Disorder': 4, 'Bipolar Disorder':4,'Schizoaffective': 5, 'Schizophrenia_Strict': 6,'Schizophrenia':6,'Autism':7,
-                   'HGG':8,'LGG':9,'unknown Tumor':10,'Stroke':11,'Major Depressive Disorder':12,'FTD':13}
+                   'Bipolar_Disorder': 4, 'Bipolar Disorder':4,
+                   'Schizoaffective': 5, 'Schizophrenia_Strict': 6,'Schizophrenia':6,
+                   'Autism':7,
+                   'HGG':8,'LGG':9,'unknown Tumor':10,
+                   'Stroke':11,
+                   'Major Depressive Disorder':12,'FTD':13}
         gcode = np.array(list(map(lambda x: dis_map[x], dx)))
         return gcode
 
@@ -324,6 +314,7 @@ class Dataset(object):
         Returns:
             ori_img: the MRI data matrix in which nan is set to 0.
         '''
+        brain_label = None
         if 'NATIVE_GM_' in name:
             dir, file = os.path.split(os.path.join(img_path, name))
             file = file.replace('NATIVE_GM_', '')
@@ -390,12 +381,68 @@ class Dataset(object):
 
         return bat_data, bat_labels, bat_aux_label, bat_dis_label
 
+    @staticmethod
+    def load_fmridata(modal, path = ABIDE_FMRIPATH) -> pd.DataFrame :
+
+        path = os.path.join(path,'ABIDE_pred')
+        valid_subjects = list(filter(lambda x: (os.path.exists(
+            os.path.join(path, x, 'conn_processing/results/firstlevel/SBC_01',
+                         'resultsROI_Subject001_Condition001.mat'))), sorted(os.listdir(path))))
+        Z_vectors = []
+        #Z_vectors_Premove = np.empty(shape=(0, len(P_index)))
+
+        for subject in valid_subjects:
+
+            Z_map = np.array(scipy.io.loadmat(os.path.join(path, subject, 'conn_processing/results/firstlevel/SBC_01',
+                                                           'resultsROI_Subject001_Condition001.mat'))['Z'])
+            array_size = ((Z_map.shape[0] - 1) * Z_map.shape[0]) // 2
+            #array_size = ((Z_map.shape[0] - 34) * (Z_map.shape[0] - 33) ) // 2
+            #array_size = 33 * 32 //2
+            Z_vector = np.zeros(shape=(1, array_size))
+            pos1 = 0
+            for row in range(Z_map.shape[0]):
+                for column in range(row):
+                        Z_vector[0, pos1] = Z_map[row, column]
+                        pos1 += 1
+
+            Z_vectors.append(Z_vector)
+
+        Z_dict = { modal: Z_vectors,'ID': valid_subjects}
+        Z_dataframe = pd.DataFrame(Z_dict)
+
+        return Z_dataframe
+
     def __add__(self, other):
-        raise NotImplementedError
+        assert isinstance(other, Dataset)
+        assert self.preload == other.preload
+        assert self.smooth == other.smooth
+        assert self.maskmat == other.maskmat
+        assert self.clfsetting == other.clfsetting
+        assert type(self.aux_labels) == type(other.aux_labels)
+
+        new_ins = Dataset.__new__(Dataset)
+        new_ins.preload = self.preload
+        new_ins.smooth = self.smooth
+        new_ins.maskmat = self.maskmat
+        new_ins.clfsetting = self.clfsetting
+
+        new_ins.labels = np.append(self.labels, other.labels, axis=0)
+        new_ins.dis_label = np.append(self.dis_label, other.dis_label, axis=0)
+        new_ins.namelist = np.append(self.namelist, other.namelist, axis=0)
+        new_ins.info = self.info.append(other.info)
+        new_ins.id_info = np.append(self.id_info, other.id_info, axis=0)
+
+        if self.aux_labels is None:
+            new_ins.aux_labels = None
+        else:
+            new_ins.aux_labels = np.append(self.aux_labels, other.aux_labels)
+
+        new_ins.data = self.data + other.data
+
+        return new_ins
 
     def __len__(self):
         return len(self.id_info)
-
 
 class Patch_Data(data.Dataset):
     def __init__(self, imgdata, patch_size, center_mat, shift, flip_axis, resample_patch=None):
@@ -431,7 +478,6 @@ class Patch_Data(data.Dataset):
     def __len__(self):
         return len(self.imgdata)
 
-
 def train_test_nooverlap(data_size, test_size, id_info, seed=None, stratify=None):
     test = []
     train = []
@@ -458,9 +504,6 @@ def train_test_nooverlap(data_size, test_size, id_info, seed=None, stratify=None
 
     return train, test
 
-
-# #TODO: adaptive output size of model for diff dataet
-# #TODO: unified NEW_DX determination function for all datasets.
 class ADNI(Dataset):
     # TODO: normalization for regression
     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
@@ -734,131 +777,10 @@ class ADNI(Dataset):
         LABEL = np.array(list(zip(*LABEL)))
         return LABEL
 
-class AIBL(Dataset):
-    def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
-                 ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
-        image_path = AIBL_PATH
-        super(AIBL, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
-                                   only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
-                                   maskmat=maskmat, seed=seed, preload=preload, dsettings={})
-
-    def get_table(self, path, modals: Union[list, str], dsettings) -> pd.DataFrame:
-        info = pd.read_csv(os.path.join(path, 'Data_extract_3.3.0/aibl_pdxconv_01-Jun-2018.csv'), dtype=str)
-
-        # new_dx gen
-        for i in info.index:
-            if info.loc[i, 'DXCURREN'] == '1':
-                info.loc[i, 'NEW_DX'] = 'CN'
-            elif info.loc[i, 'DXCURREN'] == '3':
-                info.loc[i, 'NEW_DX'] = 'AD'
-            elif info.loc[i, 'DXCURREN'] == '2':
-                rid = info.loc[i, 'RID']
-                dxs = info[info['RID'] == rid]['DXCURREN'].values
-                if '3' in dxs:
-                    info.loc[i, 'NEW_DX'] = 'pMCI'
-                else:
-                    info.loc[i, 'NEW_DX'] = 'sMCI'
-        info = info[~pd.isnull(info['NEW_DX'])]
-
-        for i in info.index:
-            rid = info.loc[i]['RID']
-            vis = info.loc[i]['VISCODE']
-            pdf_path = os.path.join(path, 'AIBL_pre', rid, 'report', 'catreport_' + vis + '.pdf')
-            if os.path.exists(pdf_path):
-                info.loc[i, modals[0]] = os.path.join(path, 'AIBL_pre', rid, 'mri', modals[0] + vis + '.nii')
-        if len(modals) > 1:
-            raise NotImplementedError
-
-        info['VISIT'] = info['VISCODE'].apply(lambda x: 0 if x == 'bl' else int(x.replace('m', '')))
-        info = info.rename(columns={'RID': 'ID', 'NEW_DX': 'DX', 'PTGENDER': 'GENDER'})
-
-        return info
-
-    @staticmethod
-    def _filtering(info: pd.DataFrame):
-        '''exclude for AD->CN
-        '''
-        p_rid = []
-        _info = info.copy()[['ID', 'VISIT', 'DX']]
-        _info['DX'] = _info['DX'].apply(
-            func=lambda x: {'CN': 0, 'sMCI': 1, 'pMCI': 2, 'AD': 3, np.nan: -1}[x])
-
-        _info['ID'] = _info['ID'].values.astype(int)
-        _info = _info.sort_values(by=['ID', 'VISIT'], kind='mergesort')
-        _info = _info[_info['DX'] != -1]
-        for i in _info['ID'].drop_duplicates().values:
-            temp = _info[_info['ID'] == i]
-            if not (temp.sort_values(by=['VISIT'], kind='mergesort')['DX'].values ==
-                    temp.sort_values(by=['DX'], kind='mergesort')['DX'].values).all():
-                p_rid.append(i)
-        ids = set(info['ID'].values) - set(p_rid)
-        return ids
-
-    @staticmethod
-    def dx_mapping(dx, clfsetting):
-        if clfsetting == 'CN-AD':
-            dx_label = np.array(list(map(lambda x: {'CN': 0, 'sMCI': -1, 'pMCI': -1, 'AD': 1}[x], dx)))
-        elif clfsetting == 'sMCI-pMCI':
-            dx_label = np.array(list(map(lambda x: {'CN': -1, 'sMCI': 0, 'pMCI': 1, 'AD': -1}[x], dx)))
-        elif clfsetting == 'DIS-NC':
-            dx_label = np.array(list(map(lambda x: {'CN': 0, 'sMCI': -1, 'pMCI': -1, 'AD': 1}[x], dx)))
-        else:
-            raise NotImplementedError
-        return dx_label
-
-class COBRE(Dataset):
-    def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
-                 ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
-        image_path = COBRE_PATH
-        super(COBRE, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
-                                    only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
-                                    maskmat=maskmat, seed=seed, preload=preload, dsettings={})
-
-    def get_table(self, path, modals: Union[list, str], dsettings):
-        if not isinstance(modals, list):
-            modals = [modals]
-
-        info = pd.read_csv(os.path.join(path, 'COBRE/participants.tsv'), sep='\t', dtype=str)
-        info = info.rename(columns={'participant_id': 'ID', 'dx': 'DX', 'age': 'AGE', 'sex': 'GENDER'})
-        info['VISIT'] = 0
-
-        for sub in info['ID']:
-            for modal in modals[:1]:  # TODO@ZZC(20220721): for other modalities
-                subj_path = os.path.join(path, 'COBRE_pred', 'sub-' + sub)
-                img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
-                if img_path is not None:
-                    info.loc[info['ID'] == sub, modal] = img_path
-
-        return info
-
-    @staticmethod
-    def _filtering(info: pd.DataFrame):
-        subs = []
-        for sub in info['ID']:
-            if (info.loc[info['ID'] == sub, 'DX'] == 'Schizophrenia_Strict').all():
-                subs.append(sub)
-            elif (info.loc[info['ID'] == sub, 'DX'] == 'No_Known_Disorder').all():
-                subs.append(sub)
-        return subs
-
-    @staticmethod
-    def dx_mapping(dx, clfsetting):
-        if clfsetting == 'SCZ-NC':
-            labels = map(lambda x: {'No_Known_Disorder': 0, 'Schizophrenia_Strict': 1}[x], dx)
-            labels = np.array(list(labels), dtype=int)
-
-        elif clfsetting == 'DIS-NC':
-            labels = map(lambda x: {'No_Known_Disorder': 0, 'Schizophrenia_Strict': 1}[x], dx)
-            labels = np.array(list(labels), dtype=int)
-        else:
-            raise NotImplementedError
-
-        return labels
-
 class ABIDE(Dataset):
     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
                  ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
-        image_path = ABIDE_PATH #'/data/datasets/COBRE'
+        image_path = ABIDE_T1PATH
         super(ABIDE, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
                                     only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
                                     maskmat=maskmat, seed=seed, preload=preload, dsettings={})
@@ -872,7 +794,7 @@ class ABIDE(Dataset):
         #info['VISIT'] = 0
 
         for sub in info['ID']:
-            for modal in modals[:1]:  # TODO@ZZC(20220721): for other modalities
+            for modal in modals[:1]:
                 subj_path = os.path.join(path, 'ABIDE_T1_pred', sub)
                 img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
                 if img_path is not None:
@@ -900,6 +822,69 @@ class ABIDE(Dataset):
             raise NotImplementedError
 
         return labels
+
+
+# class ABIDE(Dataset):
+#     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
+#                  ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
+#         image_path = ABIDE_T1PATH #'/data/datasets/COBRE'
+#         super(ABIDE, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
+#                                     only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
+#                                     maskmat=maskmat, seed=seed, preload=preload, dsettings={})
+#
+#     def get_table(self, path, modals: Union[list, str], dsettings):
+#         if not isinstance(modals, list):
+#             modals = [modals]
+#
+#         info = pd.read_csv(os.path.join(path, 'ABIDE_7_15_2022.csv'), dtype=str)
+#         info = info.rename(columns={'Subject': 'ID', 'Group': 'DX', 'Age': 'AGE', 'Sex': 'GENDER','Visit':'VISIT'})
+#         #info['VISIT'] = 0
+#
+#
+#         for modal in modals:
+#             if modal in ['mw', 'mwp1', 'mwp2', 'mwp3']:
+#                 for sub in info['ID']:
+#                     subj_path = os.path.join(path, 'ABIDE_T1_pred', sub)
+#                     img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
+#                     if img_path is not None:
+#                         info.loc[info['ID'] == sub, modal] = img_path
+#                         #print(modal, img_path)
+#             elif 'fmri' in modal:
+#                 snp_df = self.load_fmridata(modal = modal)
+#                 # Brain_Hippocampus.eQTL_2_gene.tpm_top_25pct.txt
+#                 info = info.merge(right=snp_df, how='left', on=['ID'])
+#             else:
+#                 raise NotImplementedError
+#
+#         info= info.dropna(axis=0, subset=modals)
+#
+#
+#         return info
+#
+#     @staticmethod
+#     def _filtering(info: pd.DataFrame):
+#         subs = []
+#         for sub in info['ID']:
+#             if (info.loc[info['ID'] == sub, 'DX'] == 'Autism').all():
+#                 subs.append(sub)
+#             elif (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
+#                 subs.append(sub)
+#         return subs
+#
+#     @staticmethod
+#     def dx_mapping(dx, clfsetting):
+#         if clfsetting == 'AUTISM-CONTROL':
+#             labels = map(lambda x: {'Control': 0, 'Autism': 1}[x], dx)
+#             labels = np.array(list(labels), dtype=int)
+#
+#         elif clfsetting == 'DIS-NC':
+#             labels = map(lambda x: {'Control': 0, 'Autism': 1}[x], dx)
+#             labels = np.array(list(labels), dtype=int)
+#
+#         else:
+#             raise NotImplementedError
+#
+#         return labels
 
 class ATLAS_2(Dataset):
     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
@@ -931,7 +916,7 @@ class ATLAS_2(Dataset):
                                 info.loc[info['ID'] == sub, modal] = img_path
             if (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
                 for modal in modals[:1]:
-                    subj_path = os.path.join(ABIDE_PATH, 'ABIDE_T1_pred', sub)
+                    subj_path = os.path.join(ABIDE_T1PATH, 'ABIDE_T1_pred', sub)
                     img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
                     if img_path is not None:
                         info.loc[info['ID'] == sub, modal] = img_path
@@ -1009,6 +994,61 @@ class MINDS(Dataset):
 
         return labels
 
+class BraTS(Dataset):
+    def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
+                 ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
+        image_path = BraTS_PATH
+        super(BraTS, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
+                                    only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
+                                    maskmat=maskmat, seed=seed, preload=preload, dsettings={})
+
+    def get_table(self, path, modals: Union[list, str], dsettings):
+        if not isinstance(modals, list):
+            modals = [modals]
+
+        info = pd.read_csv(os.path.join(path, 'MICCAI_BraTS_20/BraTS_data.csv'), dtype=str)
+        info['VISIT'] = 0
+
+        for sub in info['ID']:
+            if (info.loc[info['ID'] == sub, 'DX']!='Control').all():
+                for modal in modals[:1]:
+                    img_path = os.path.join(path, 'MICCAI_BraTS_20_pre', sub,'T1w.nii')
+                    if os.path.exists(img_path):  #TODO:这样不便于把其他模态加进去，得改
+                        info.loc[info['ID'] == sub, modal] = img_path
+            if (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
+                for modal in modals[:1]:
+                    subj_path = os.path.join(ABIDE_T1PATH, 'ABIDE_T1_pred', sub)
+                    img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
+                    if img_path is not None:
+                        info.loc[info['ID'] == sub, modal] = img_path
+
+        return info
+
+    @staticmethod
+    def _filtering(info: pd.DataFrame):
+        subs = []
+        for sub in info['ID']:
+            if (info.loc[info['ID'] == sub, 'DX'] == 'HGG').all():
+                subs.append(sub)
+            elif (info.loc[info['ID'] == sub, 'DX'] == 'LGG').all():
+                subs.append(sub)
+            elif (info.loc[info['ID'] == sub, 'DX'] == 'unknown Tumor').all():
+                subs.append(sub)
+            elif (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
+                subs.append(sub)
+        return subs
+
+    @staticmethod
+    def dx_mapping(dx, clfsetting):
+        if clfsetting == 'TUMOR-CONTROL':
+            labels = map(lambda x: {'Control': 0, 'HGG': 1,'LGG':1,'unknown Tumor':1}[x], dx)
+            labels = np.array(list(labels), dtype=int)
+
+        else:
+            raise NotImplementedError
+
+        return labels
+
 class NIFD(Dataset):
 
     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
@@ -1078,81 +1118,82 @@ class NIFD(Dataset):
 
         return labels
 
-class BraTS(Dataset):
+class AIBL(Dataset):
     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
                  ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
-        image_path = BraTS_PATH
-        super(BraTS, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
-                                    only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
-                                    maskmat=maskmat, seed=seed, preload=preload, dsettings={})
+        image_path = AIBL_PATH
+        super(AIBL, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
+                                   only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
+                                   maskmat=maskmat, seed=seed, preload=preload, dsettings={})
 
-    def get_table(self, path, modals: Union[list, str], dsettings):
-        if not isinstance(modals, list):
-            modals = [modals]
+    def get_table(self, path, modals: Union[list, str], dsettings) -> pd.DataFrame:
+        info = pd.read_csv(os.path.join(path, 'Data_extract_3.3.0/aibl_pdxconv_01-Jun-2018.csv'), dtype=str)
 
-        info = pd.read_csv(os.path.join(path, 'MICCAI_BraTS_20/BraTS_data.csv'), dtype=str)
-        info['VISIT'] = 0
+        # new_dx gen
+        for i in info.index:
+            if info.loc[i, 'DXCURREN'] == '1':
+                info.loc[i, 'NEW_DX'] = 'CN'
+            elif info.loc[i, 'DXCURREN'] == '3':
+                info.loc[i, 'NEW_DX'] = 'AD'
+            elif info.loc[i, 'DXCURREN'] == '2':
+                rid = info.loc[i, 'RID']
+                dxs = info[info['RID'] == rid]['DXCURREN'].values
+                if '3' in dxs:
+                    info.loc[i, 'NEW_DX'] = 'pMCI'
+                else:
+                    info.loc[i, 'NEW_DX'] = 'sMCI'
+        info = info[~pd.isnull(info['NEW_DX'])]
 
-        for sub in info['ID']:
-            if (info.loc[info['ID'] == sub, 'DX']!='Control').all():
-                for modal in modals[:1]:
-                    img_path = os.path.join(path, 'MICCAI_BraTS_20_pre', sub,'T1w.nii')
-                    if os.path.exists(img_path):  #TODO@fyl(20221104):这样不便于把其他模态加进去，得改
-                        info.loc[info['ID'] == sub, modal] = img_path
-            if (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
-                for modal in modals[:1]:
-                    subj_path = os.path.join(ABIDE_PATH, 'ABIDE_T1_pred', sub)
-                    img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
-                    if img_path is not None:
-                        info.loc[info['ID'] == sub, modal] = img_path
+        for i in info.index:
+            rid = info.loc[i]['RID']
+            vis = info.loc[i]['VISCODE']
+            pdf_path = os.path.join(path, 'AIBL_pre', rid, 'report', 'catreport_' + vis + '.pdf')
+            if os.path.exists(pdf_path):
+                info.loc[i, modals[0]] = os.path.join(path, 'AIBL_pre', rid, 'mri', modals[0] + vis + '.nii')
+        if len(modals) > 1:
+            raise NotImplementedError
+
+        info['VISIT'] = info['VISCODE'].apply(lambda x: 0 if x == 'bl' else int(x.replace('m', '')))
+        info = info.rename(columns={'RID': 'ID', 'NEW_DX': 'DX', 'PTGENDER': 'GENDER'})
 
         return info
 
     @staticmethod
     def _filtering(info: pd.DataFrame):
-        subs = []
-        for sub in info['ID']:
-            if (info.loc[info['ID'] == sub, 'DX'] == 'HGG').all():
-                subs.append(sub)
-            elif (info.loc[info['ID'] == sub, 'DX'] == 'LGG').all():
-                subs.append(sub)
-            elif (info.loc[info['ID'] == sub, 'DX'] == 'unknown Tumor').all():
-                subs.append(sub)
-            elif (info.loc[info['ID'] == sub, 'DX'] == 'Control').all():
-                subs.append(sub)
-        return subs
+        '''exclude for AD->CN
+        '''
+        p_rid = []
+        _info = info.copy()[['ID', 'VISIT', 'DX']]
+        _info['DX'] = _info['DX'].apply(
+            func=lambda x: {'CN': 0, 'sMCI': 1, 'pMCI': 2, 'AD': 3, np.nan: -1}[x])
+
+        _info['ID'] = _info['ID'].values.astype(int)
+        _info = _info.sort_values(by=['ID', 'VISIT'], kind='mergesort')
+        _info = _info[_info['DX'] != -1]
+        for i in _info['ID'].drop_duplicates().values:
+            temp = _info[_info['ID'] == i]
+            if not (temp.sort_values(by=['VISIT'], kind='mergesort')['DX'].values ==
+                    temp.sort_values(by=['DX'], kind='mergesort')['DX'].values).all():
+                p_rid.append(i)
+        ids = set(info['ID'].values) - set(p_rid)
+        return ids
 
     @staticmethod
     def dx_mapping(dx, clfsetting):
-        if clfsetting == 'TUMOR-CONTROL':
-            labels = map(lambda x: {'Control': 0, 'HGG': 1,'LGG':1,'unknown Tumor':1}[x], dx)
-            labels = np.array(list(labels), dtype=int)
-
+        if clfsetting == 'CN-AD':
+            dx_label = np.array(list(map(lambda x: {'CN': 0, 'sMCI': -1, 'pMCI': -1, 'AD': 1}[x], dx)))
+        elif clfsetting == 'sMCI-pMCI':
+            dx_label = np.array(list(map(lambda x: {'CN': -1, 'sMCI': 0, 'pMCI': 1, 'AD': -1}[x], dx)))
+        elif clfsetting == 'DIS-NC':
+            dx_label = np.array(list(map(lambda x: {'CN': 0, 'sMCI': -1, 'pMCI': -1, 'AD': 1}[x], dx)))
         else:
             raise NotImplementedError
+        return dx_label
 
-        return labels
-
-
-
-def client_iid(data, num_users):
-    num_items = int(len(data)/num_users)
-    dict_users, all_idxs = {}, [i for i in range(len(data))]
-    for i in range(num_users):
-        dict_users[i] = set(np.random.choice(all_idxs, num_items,
-                                             replace=False))
-        all_idxs = list(set(all_idxs) - dict_users[i])
-    return dict_users
-
-def client_noniid_unequal(data_train, num_users):
-    raise NotImplementedError
-
-
-def client_noniid(data_train, num_users):
-    raise NotImplementedError
 
 def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat, flip_axises, no_smooth, no_shuffle,
-                no_shift, n_threads, seed=1234, resample_patch=None, trtype='single', only_bl=False,federated_setting=None):
+                no_shift, n_threads, seed=1234, resample_patch=None, trtype='single', only_bl=False):
+
     if dataset == 'ADNI_dx':
         data_train = ADNI(subset=['training', 'testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=only_bl,
@@ -1163,6 +1204,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         data_test = ADNI(subset=['training', 'validation', 'testing'], clfsetting=clfsetting, modals=modals,
                          no_smooth=no_smooth, seed=seed, only_bl=True,
                          dsettings={'cohort': 'ADNI2', 'label_names': ['DX']})
+
     elif dataset == 'ADNI_DX':
         data_train = ADNI(subset=['training'], clfsetting=clfsetting, modals=modals,
                           no_smooth=no_smooth, seed=seed, only_bl=only_bl,
@@ -1173,6 +1215,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         data_test = ADNI(subset=['testing'], clfsetting=clfsetting, modals=modals,
                          no_smooth=no_smooth, seed=seed, only_bl=True,
                          dsettings={'cohort': 'ALL', 'label_names': ['DX']})
+
     elif dataset == 'AIBL':
         data_train = AIBL(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=False)
@@ -1180,13 +1223,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                         seed=seed, only_bl=True)
         data_test = AIBL(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                          seed=seed, only_bl=True)
-    elif dataset == 'COBRE':
-        data_train = COBRE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                           seed=seed, only_bl=True)
-        data_val = COBRE(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                         seed=seed, only_bl=True)
-        data_test = COBRE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                          seed=seed, only_bl=True)
+
     elif dataset=='ABIDE':
         data_train = ABIDE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                            seed=seed, only_bl=True)
@@ -1194,13 +1231,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                          seed=seed, only_bl=True)
         data_test = ABIDE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=True)
-    elif dataset=='NIFD':
-        data_train = NIFD(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                           seed=seed, only_bl=True)
-        data_val = NIFD(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                         seed=seed, only_bl=True)
-        data_test = NIFD(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                          seed=seed, only_bl=True)
+
     elif dataset=='BraTS':
         data_train = BraTS(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                            seed=seed, only_bl=True)
@@ -1208,6 +1239,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                          seed=seed, only_bl=True)
         data_test = BraTS(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=True)
+
     elif dataset=='ATLAS_2':
         data_train = ATLAS_2(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                            seed=seed, only_bl=True)
@@ -1215,6 +1247,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                          seed=seed, only_bl=True)
         data_test = ATLAS_2(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=True)
+
     elif dataset=='MINDS':
         data_train = MINDS(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                              seed=seed, only_bl=True)
@@ -1222,25 +1255,10 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                            seed=seed, only_bl=True)
         data_test = MINDS(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                             seed=seed, only_bl=True)
+
     elif dataset == 'COMB':
         if clfsetting != 'DIS-NC':
             raise NotImplementedError
-        cobre_train = COBRE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                            seed=seed, only_bl=False)
-        cobre_val = COBRE(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                          seed=seed, only_bl=True)
-        cobre_test = COBRE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                           seed=seed, only_bl=True)
-
-        adni_train = ADNI(subset=['training'], clfsetting=clfsetting, modals=modals,
-                          no_smooth=no_smooth, seed=seed, only_bl=only_bl,
-                          dsettings={'cohort': 'ALL', 'label_names': ['DX'], 'final_dx': False})
-        adni_val = ADNI(subset=['validation'], clfsetting=clfsetting, modals=modals,
-                        no_smooth=no_smooth, seed=seed, only_bl=True,
-                        dsettings={'cohort': 'ALL', 'label_names': ['DX'], 'final_dx': False})
-        adni_test = ADNI(subset=['testing'], clfsetting=clfsetting, modals=modals,
-                         no_smooth=no_smooth, seed=seed, only_bl=True,
-                         dsettings={'cohort': 'ALL', 'label_names': ['DX'], 'final_dx': False})
         atlas_train = ATLAS_2(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                            seed=seed, only_bl=True)
         atlas_val = ATLAS_2(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
@@ -1262,13 +1280,6 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         minds_test = MINDS(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                             seed=seed, only_bl=True)
 
-        nifd_train = NIFD(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                           seed=seed, only_bl=True)
-        nifd_val = NIFD(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                         seed=seed, only_bl=True)
-        nifd_test = NIFD(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
-                          seed=seed, only_bl=True)
-
         abide_train = ABIDE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                            seed=seed, only_bl=True)
         abide_val = ABIDE(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
@@ -1276,9 +1287,16 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         abide_test = ABIDE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=True)
 
-        data_train = cobre_train + adni_train+atlas_train+brats_train+minds_train+nifd_train+abide_train
-        data_val = cobre_val + adni_val+atlas_val+brats_val+minds_val+nifd_val+abide_val
-        data_test = cobre_test + adni_test+atlas_test+brats_test+minds_test+nifd_test+abide_test
+        data_train = atlas_train + brats_train + minds_train + abide_train
+        data_val = atlas_val + brats_val + minds_val + abide_val
+        data_test = atlas_test + brats_test + minds_test + abide_test
+    elif dataset == 'NIFD':
+        data_train = NIFD(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                          seed=seed, only_bl=True)
+        data_val = NIFD(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                        seed=seed, only_bl=True)
+        data_test = NIFD(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                         seed=seed, only_bl=True)
     else:
         raise NotImplementedError
 
@@ -1293,25 +1311,11 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                               shift=False, flip_axis=None, resample_patch=resample_patch)
         data_val = torch.utils.data.DataLoader(data_val, batch_size=batch_size, shuffle=False,
                                                num_workers=n_threads, pin_memory=True)
+
     data_test = Patch_Data(data_test, patch_size=patch_size, center_mat=center_mat,
                            shift=False, flip_axis=None, resample_patch=resample_patch)
     data_test = torch.utils.data.DataLoader(data_test, batch_size=batch_size, shuffle=False,
                                             num_workers=n_threads, pin_memory=True)
-    if federated_setting:
-        # TODO
-        if federated_setting['iid']:
-            train_user_groups = client_iid(data_train, federated_setting['num_users'])
-            val_user_groups=client_iid(data_val,federated_setting['num_users'])
-        else:
-            # Sample Non-IID user data from Mnist
-            if federated_setting['unequal']:
-                raise NotImplementedError
-                # Chose uneuqal splits for every user
-                #user_groups = client_noniid_unequal(data_train, args.num_users)
-            else:
-                raise NotImplementedError
-                # Chose euqal splits for every user
-                #user_groups = client_noniid(data_train, args.num_users)
 
     if dataset not in ['AIBL']:
         checkpath = os.path.join(BASEDIR, 'utils', 'datacheck', dataset + '_' + clfsetting + '.pkl')
@@ -1320,7 +1324,7 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
                 id_infos = pkl.load(f)
             # assert (np.sort(np.unique(id_infos[0])) == np.sort(np.unique(data_train.dataset.imgdata.id_info))).all()
             # assert (np.sort(np.unique(id_infos[1])) == np.sort(np.unique(data_val.dataset.imgdata.id_info))).all()
-            # assert (np.sort(np.unique(id_infos[2])) == np.sort(np.unique(data_test.dataset.imgdata.id_info))).all()   #TODO：ATLAS2在这三行碰壁了，还没想清楚为什么
+            # assert (np.sort(np.unique(id_infos[2])) == np.sort(np.unique(data_test.dataset.imgdata.id_info))).all()   #TODO：ATLAS2在这三行碰壁了
         else:
             if not os.path.exists(os.path.join(BASEDIR, 'utils', 'datacheck')):
                 os.mkdir(os.path.join(BASEDIR, 'utils', 'datacheck'))
@@ -1342,6 +1346,4 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         # TODO: trtype == k-fold
         raise NotImplementedError
 
-    if federated_setting:
-        return dataloader_list,train_user_groups,val_user_groups
-    return dataloader_list,None,None
+    return dataloader_list, None, None

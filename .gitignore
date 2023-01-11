@@ -1,7 +1,6 @@
 .idea/
 .ipynb_checkpoints/
 archive/
-data/
 results/
 saved_model/
 *.pth

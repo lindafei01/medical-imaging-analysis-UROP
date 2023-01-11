@@ -1,4 +1,3 @@
-# https://github.com/lucidrains/vit-pytorch
 import torch
 from torch import nn
 import numpy as np
@@ -79,7 +78,7 @@ class Transformer(nn.Module):
 
 class ViT(nn.Module):
     def __init__(self, num_patches, patch_size, num_classes, dim, depth, heads, mlp_dim, pool='cls', channels=3,
-                 dim_head=64, dropout=0., emb_dropout=0.,federated=None):
+                 dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
 
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
@@ -101,7 +100,7 @@ class ViT(nn.Module):
             nn.Sigmoid()
         )
         self.criterion = nn.BCELoss()
-        self.federated=federated
+
     def forward(self, img):
         # x: batch, num_patch, channel, patch_size, patch_size, patch_size
 
@@ -126,22 +125,13 @@ class ViT(nn.Module):
 
         with torch.no_grad():
             self.train(False)
-            if self.federated:
-                for i, data in enumerate(val_loader.dataset.dataset, 0):
-                    inputs, aux_labels, labels, dis_label = data
-                    inputs = inputs.to(device=device, dtype=dtype)
-                    outputs = self(inputs)
-                    predicts.append(outputs)
-                    groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
-                    group_labels.append(dis_label[:, 0])
-            else:
-                for i, data in enumerate(val_loader, 0):
-                    inputs, aux_labels, labels, dis_label = data
-                    inputs = inputs.to(device=device, dtype=dtype)
-                    outputs = self(inputs)
-                    predicts.append(outputs)
-                    groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
-                    group_labels.append(dis_label[:, 0])
+            for i, data in enumerate(val_loader, 0):
+                inputs, aux_labels, labels, dis_label = data
+                inputs = inputs.to(device=device, dtype=dtype)
+                outputs = self(inputs)
+                predicts.append(outputs)
+                groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
+                group_labels.append(dis_label[:, 0])
 
         _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
         _probs = _probs.transpose(0, 1).cpu()
@@ -175,7 +165,7 @@ class ViT(nn.Module):
                 outputs = self(inputs)
                 predicts.append(outputs)
                 groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
-                group_labels.append(dis_label[:,0])  #为啥会变成one-dimension？？？？没有想通 [:,0]
+                group_labels.append(dis_label[:,0])  #为啥会变成one-dimension？
 
         _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
         _probs = _probs.transpose(0, 1).cpu()
@@ -187,7 +177,7 @@ class ViT(nn.Module):
         group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
 
 
-        groundtruths = groundtruths[:, :, -1:]  #这里维度为啥变成2了
+        groundtruths = groundtruths[:, :, -1:]  #这里维度变成2了?
         predicts = predicts[:, :, -1:]
 
         non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(groundtruths.shape[1])]
@@ -196,65 +186,149 @@ class ViT(nn.Module):
 
         return predicts, groundtruths, group_labels, val_loss
 
-    def fit(self, train_loader, optimizer, device, dtype,local_epoch=None):
-        if self.federated:
-            losses = torch.zeros(train_loader.dataset.dataset.dataset.labels.shape[1], dtype=dtype, device=device, )
-            #train_loader={DataLoader:26}  train_loader.dataset={DataSplit:26}  train_loader.dataset.dataset={DataLoader:131}
-            #train_loader.dataset.dataset.dataset={Patch_Data:2096}
-            self.train(True)
-            if not local_epoch:
-                for n, data in enumerate(train_loader.dataset.dataset, 0):
-                    inputs, aux_labels, labels, dis_label = data
+    def fit(self, train_loader, optimizer, device, dtype):
+        losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
+        self.train(True)
+        for n, data in enumerate(train_loader, 0):
+            inputs, aux_labels, labels, dis_label = data
 
-                    # multi patch
-                    labels = labels[:, 0, :]
+            # multi patch
+            labels = labels[:, 0, :]
 
-                    inputs = inputs.to(device=device, dtype=dtype)
-                    labels = labels.to(device=device, dtype=dtype)
-                    optimizer.zero_grad()
-                    outputs = self(inputs)
+            inputs = inputs.to(device=device, dtype=dtype)
+            labels = labels.to(device=device, dtype=dtype)
+            optimizer.zero_grad()
+            outputs = self(inputs)
+            for i in range(labels.shape[1]):
+                assert outputs[i].shape == labels[:, i, :].shape
+                non_nan = ~torch.isnan(labels[:, i, :])
+                if non_nan.any():
+                    loss = self.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
+                    loss.backward(retain_graph=True)
+                    losses[i] += loss.detach()
+            optimizer.step()
+        return losses / len(train_loader)
 
-                    for i in range(labels.shape[1]):
-                        assert outputs[i].shape == labels[:, i, :].shape
-                        non_nan = ~torch.isnan(labels[:, i, :])
-                        if non_nan.any():
-                            loss = self.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
-                            loss.backward(retain_graph=True)
-                            losses[i] += loss.detach()
-                    optimizer.step()
-                return losses / len(train_loader)
-            if local_epoch:
-                raise NotImplementedError
-        else:
-            losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
-            # train_loader={DataLoader:420}
-            # train_Loader.dataset={Patch_Data:2096}
-            self.train(True)
-            for n, data in enumerate(train_loader, 0):
-                inputs, aux_labels, labels, dis_label = data
+def forward(model, img, device, kwargs):
+    # x: batch, num_patch, channel, patch_size, patch_size, patch_size
 
-                # multi patch
-                labels = labels[:, 0, :]
+    embed = nn.Linear(int(np.prod(kwargs['patch_size']) * kwargs['channels']), kwargs['dim']).to(device=device)
+    x = img.view(*img.shape[:2], -1)
+    x = embed(x)
+    b, n, _ = x.shape
 
-                inputs = inputs.to(device=device, dtype=dtype)
-                labels = labels.to(device=device, dtype=dtype)
-                optimizer.zero_grad()
-                outputs = self(inputs)
-                # print(labels,labels.shape)
-                # print(outputs)
-                # print(labels.shape[1])
-                # print(labels[:,0,:],labels[:,0,:].shape)
-                # print(outputs[0],outputs[0].shape)
-                for i in range(labels.shape[1]):
-                    assert outputs[i].shape == labels[:, i, :].shape
-                    non_nan = ~torch.isnan(labels[:, i, :])
-                    if non_nan.any():
-                        loss = self.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
-                        loss.backward(retain_graph=True)
-                        losses[i] += loss.detach()
-                optimizer.step()
-            return losses / len(train_loader)
+    assert kwargs['pool'] in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
+    pos_embedding_init = nn.Parameter(torch.randn(1, kwargs['num_patches'] + 1, kwargs['dim']))
+    cls_token_init = nn.Parameter(torch.randn(1, 1, kwargs['dim']))
+
+    # model.cls_token = model.cls_token.to(device)
+
+
+
+    cls_tokens = repeat(cls_token_init, '() n d -> b n d', b=b).to(device=device)
+    pos_embedding = pos_embedding_init.to(device=device)
+
+    x = torch.cat((cls_tokens, x), dim=1)
+    x += pos_embedding[:, :(n + 1)]
+    x = model.dropout(x)
+
+    x = model.transformer(x)
+    x = x.mean(dim=1) if kwargs['pool'] == 'mean' else x[:, 0]
+    x = model.to_latent(x)
+    return model.mlp_head(x),
+
+def evaluate_data(model, val_loader, device, kwargs, dtype='float32'):
+    predicts = []
+    groundtruths = []
+    group_labels = []
+
+    with torch.no_grad():
+        model.train(False)
+        for i, data in enumerate(val_loader, 0):
+            inputs, aux_labels, labels, dis_label = data
+            inputs = inputs.to(device=device, dtype=dtype)
+            outputs = forward(model, inputs, device, kwargs)
+            predicts.append(outputs)
+            groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
+            group_labels.append(dis_label[:, 0])
+
+    _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
+    _probs = _probs.transpose(0, 1).cpu()
+
+    predicts = np.array(
+        [np.concatenate([j[i].cpu().numpy() for j in predicts], axis=0) for i in range(len(predicts[1]))])
+    predicts = predicts.transpose((1, 0, 2))
+    groundtruths = np.concatenate(groundtruths, axis=0)
+    group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
+
+
+    groundtruths = groundtruths[:, :, -1:]
+    predicts = predicts[:, :, -1:]
+
+    non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(groundtruths.shape[1])]
+    val_loss = sum([model.criterion(_probs[:, i, :][non_nan[i]], torch.from_numpy(groundtruths[:, i, :])[non_nan[i]])
+                    for i in range(groundtruths.shape[1])])
+
+    return predicts, groundtruths, group_labels, val_loss
+
+def predict_data(model, val_loader, device, kwargs, dtype='float32'):
+    predicts = []
+    groundtruths = []
+    group_labels = []
+
+    with torch.no_grad():
+        model.train(False)
+        for i, data in enumerate(val_loader, 0):
+            inputs, aux_labels, labels, dis_label = data
+            inputs = inputs.to(device=device, dtype=dtype)
+            outputs = forward(model, inputs, device, kwargs)
+            predicts.append(outputs)
+            groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
+            group_labels.append(dis_label[:,0])  #为啥会变成one-dimension？
+
+    _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
+    _probs = _probs.transpose(0, 1).cpu()
+
+    predicts = np.array(
+        [np.concatenate([j[i].cpu().numpy() for j in predicts], axis=0) for i in range(len(predicts[1]))])
+    predicts = predicts.transpose((1, 0, 2))
+    groundtruths = np.concatenate(groundtruths, axis=0)
+    group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
+
+
+    groundtruths = groundtruths[:, :, -1:]  #这里维度变成2了?
+    predicts = predicts[:, :, -1:]
+
+    non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(groundtruths.shape[1])]
+    val_loss = sum([model.criterion(_probs[:, i, :][non_nan[i]], torch.from_numpy(groundtruths[:, i, :])[non_nan[i]])
+                    for i in range(groundtruths.shape[1])])
+
+    return predicts, groundtruths, group_labels, val_loss
+
+def fit(model, train_loader, optimizer, device, kwargs, dtype):
+    losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
+    model.train(True)
+
+    for n, data in enumerate(train_loader, 0):
+        inputs, aux_labels, labels, dis_label = data
+        # multi patch
+        labels = labels[:, 0, :]
+
+        inputs = inputs.to(device=device, dtype=dtype)
+        labels = labels.to(device=device, dtype=dtype)
+        optimizer.zero_grad()
+        outputs = forward(model, inputs, device, kwargs)
+
+        for i in range(labels.shape[1]):
+            assert outputs[i].shape == labels[:, i, :].shape
+            non_nan = ~torch.isnan(labels[:, i, :])
+            if non_nan.any():
+                loss = model.criterion(outputs[i][non_nan], labels[:, i, :][non_nan])
+                loss.backward(retain_graph=True)
+                losses[i] += loss.detach()
+        optimizer.step()
+    return losses / len(train_loader)
 
 if __name__ == '__main__':
     def count_params(model, framework='pytorch'):
@@ -267,8 +341,6 @@ if __name__ == '__main__':
             raise NotImplementedError
         print('The network has {} params.'.format(params))
 
-
-    #
     # model = ViT(num_patches=80, patch_size=(25, 25, 25), dim=64, depth=6, dropout=0.1)
     model = ViT(num_patches=80, patch_size=(25, 25, 25), num_classes=1, dim=64, depth=6, heads=8, mlp_dim=4 * 64,
                 pool='cls', channels=1, dim_head=64, dropout=0.1, emb_dropout=0.1)

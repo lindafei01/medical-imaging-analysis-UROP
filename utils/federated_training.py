@@ -1,4 +1,3 @@
-import logging
 from datetime import datetime
 import copy
 import torch
@@ -10,11 +9,11 @@ from sklearn.metrics import auc
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from .opts import BASEDIR, DTYPE, LR_PATIENCE, LR_MUL_FACTOR, MOMENTUM, DAMPENING, WEIGHT_DECAY
-from .utils import mf_save_model, mf_load_model
+from .utils import mf_save_model, mf_load_model, federated_logging
 from .tools import ModifiedReduceLROnPlateau, Save_Checkpoint
 from models.resnet import resnet18, resnet34
 from models import DAMIDL, ViT
-from typing import Union
+from models.vit import *
 from torch.utils.data import DataLoader
 from .federated_datasets import DatasetSplit
 from opacus import PrivacyEngine
@@ -28,9 +27,8 @@ def train_epoch(epoch, global_step, train_loader, model, optimizer, writer, devi
     if writer:
         for k, v in metric_strs.items():
             writer.add_scalar(k, v, global_step=global_step)
-    print('Epoch: [%d], loss_sum: %.2f' %
+    print('local_epoch: [%d], loss_sum: %.2f' %
           (epoch + 1, losses.sum().item()))
-
 
 def validate_epoch(global_step, val_loader, model, device, writer):
     def evaluation(model, val_loader):
@@ -106,17 +104,12 @@ def predict_epoch(global_step, val_loader, model, device, writer):
     val_metric = -metric_strs['Val_Loss']
     return metric_figs, metric_strs, val_metric
 
-def train_single(model, n_epochs, dataloaders, optimname, learning_rate,
+def train_single(local_model, local_epochs, dataloaders, optimizer, learning_rate,
                  device, logstring, no_log, no_val):
     # the change for model is inplace
     train_loader, val_loader, test_loader = dataloaders
-    model.to(device=device, dtype=DTYPE)
+    local_model.to(device=device, dtype=DTYPE)
 
-    if optimname == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=MOMENTUM,
-                              dampening=DAMPENING, weight_decay=WEIGHT_DECAY)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     if not no_log:
         writer = SummaryWriter(comment=logstring)
     else:
@@ -128,21 +121,21 @@ def train_single(model, n_epochs, dataloaders, optimname, learning_rate,
     save_checkpoint = Save_Checkpoint(save_func=mf_save_model, verbose=True,
                                       path=saved_path, trace_func=print, mode='min')
 
-    for epoch in range(n_epochs):
+    for epoch in range(local_epochs):
         global_step = len(train_loader.dataset) * epoch
         #dataset是ADNI_DX:len(train_loader.dataset)=2096,batch_size=16,batch_sampler 131个，131*16=2096
-        train_epoch(epoch, global_step, train_loader, model, optimizer, writer, device)
+        train_epoch(epoch, global_step, train_loader, local_model, optimizer, writer, device)
         if not no_val:
             metric_figs, metric_strs, val_metric = validate_epoch(
-                global_step, val_loader, model, device, writer)
+                global_step, val_loader, local_model, device, writer)
             print(metric_strs)
         else:
             val_metric = epoch
 
         scheduler.step(-val_metric)
-        save_checkpoint(-val_metric, model)
+        save_checkpoint(-val_metric, local_model)
 
-    model = mf_load_model(model=model, path=saved_path, device=device)
+    model = mf_load_model(model=local_model, path=saved_path, device=device)
     return model, saved_path
 
 def average_weights(w):
@@ -156,80 +149,95 @@ def average_weights(w):
         w_avg[key] = torch.div(w_avg[key], len(w))
     return w_avg
 
-def train_federated_single(model, args, n_epochs, dataloaders, optimname, learning_rate,
-                 device, logstring, no_log, no_val,train_user_groups=None,val_user_groups=None,federated_setting=None):
+def train_federated_single(global_model, args, global_epochs, data, optimname, learning_rate,
+                 device, logstring, no_log, no_val,train_user_groups,val_user_groups):
 
-    train_loader, val_loader, test_loader = dataloaders
-    model.to(device=device, dtype=DTYPE)
-
-    if optimname == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=MOMENTUM,
-                              dampening=DAMPENING, weight_decay=WEIGHT_DECAY)
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-
-
+    data_train, data_val, data_test = data
+    test_loader = torch.utils.data.DataLoader(data_test, batch_size=args.batch_size, shuffle=False,
+                                                num_workers=args.n_threads, pin_memory=True)
+    global_model.to(device=device, dtype=DTYPE)
     saved_path = os.path.join(BASEDIR, 'saved_model', datetime.now().strftime('%b%d_%H-%M-%S') + '_' +
                               socket.gethostname() + logstring + '.pth')
 
-    for epoch in range(n_epochs):
+    for global_epoch in range(global_epochs): #global_epoch
+        print(f'*****************************************\r\nglobal round {global_epoch+1} has started\r\n*****************************************')
         local_weights = []
-        local_models = []
-        m = max(int(federated_setting['frac'] * federated_setting['num_users']), 1)
-        idxs_users = np.random.choice(range(federated_setting['num_users']), m, replace=False)
+        epsilons = np.zeros(args.federated_setting['num_users'])
+        epsilon_log= []
+
+        #挑选本全局轮次参与训练的用户
+        m = max(int(args.federated_setting['frac'] * args.federated_setting['num_users']), 1)
+        idxs_users = np.random.choice(range(args.federated_setting['num_users']), m, replace=False)
+
         for idx in idxs_users:
             local_train_idxs = np.array([int(i) for i in train_user_groups[idx]])
-            local_val_idxs=np.array([int(i) for i in val_user_groups[idx]])
-            test1 = DatasetSplit(train_loader,local_train_idxs)
-            local_train_loader = DataLoader(DatasetSplit(train_loader,local_train_idxs),
-                                            shuffle=True)
-            local_val_loader=DataLoader(DatasetSplit(val_loader,local_val_idxs))
-            local_data=[local_train_loader,local_val_loader,test_loader]
-            local_models[idx] = copy.deepcopy(model)
-            privacy_engine = PrivacyEngine()
-            local_model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
-                module=local_model,
-                optimizer=optimizer,
-                data_loader=local_train_loader,
-                epochs=federated_setting['local_epoch'],
-                target_epsilon=args.dp_setting['epsilon'],
-                target_delta=args.dp_setting['delta'],
-                max_grad_norm=args.dp_setting['max_grad_norm']
-            )
-            local_model,_= train_single(local_model, federated_setting['local_epoch'], local_data, optimname, learning_rate,
+            local_val_idxs = np.array([int(i) for i in val_user_groups[idx]])
+            local_train_loader = DataLoader(DatasetSplit(data_train,local_train_idxs),
+                                            batch_size=args.batch_size, shuffle=not args.no_shuffle,
+                                            num_workers=args.n_threads,pin_memory=True)
+            local_val_loader = DataLoader(DatasetSplit(data_val,local_val_idxs),batch_size=args.batch_size,
+                                          shuffle=False,num_workers=args.n_threads,pin_memory=True)
+            local_model = copy.deepcopy(global_model)
+            if optimname == 'sgd':
+                optimizer = optim.SGD(local_model.parameters(), lr=learning_rate, momentum=MOMENTUM,
+                                      dampening=DAMPENING, weight_decay=WEIGHT_DECAY)
+            else:
+                optimizer = optim.Adam(local_model.parameters(), lr=learning_rate)
+
+            privacy_engine = None
+            if args.withDP:
+                privacy_engine = PrivacyEngine()
+                local_model, optimizer, local_train_loader = privacy_engine.make_private_with_epsilon(
+                    module=local_model,
+                    optimizer=optimizer,
+                    data_loader=local_train_loader,
+                    epochs=args.federated_setting['local_epoch'],
+                    target_epsilon=args.dp_setting['epsilon'],
+                    target_delta=args.dp_setting['delta'],
+                    max_grad_norm=args.dp_setting['max_grad_norm']
+                )
+
+            local_dataloaders = [local_train_loader, local_val_loader, test_loader]
+            print(f'local client (idx:{idx}) is training...\r\n')
+            local_model,_= train_single(local_model, args.federated_setting['local_epoch'], local_dataloaders, optimizer, learning_rate,
                  device, logstring, no_log, no_val)
+            print(f'\r\nlocal client (idx:{idx}) finish!\r\n')
+            if args.withDP:
+                epsilons[idx] = privacy_engine.get_epsilon(args.dp_setting['delta'])
+
             w = local_model.state_dict()
             local_weights.append(copy.deepcopy(w))
+
+        if args.withDP:
+            epsilon_log.append(list(epsilons))
+        else:
+            epsilon_log = None
+        print('parameter aggregation (FedAvg):')
         global_weights = average_weights(local_weights)
-        model.load_state_dict(global_weights)
-        mf_save_model(model,saved_path, )
+        global_model.load_state_dict(global_weights)
+        mf_save_model(global_model,saved_path, )
+        print(f'global round {global_epoch+1} finishes!')
+        reduced_result, _, _ = predict([global_model], [[None,None,test_loader]], device)
 
-    model = mf_load_model(model=model, path=saved_path, device=device)
-    return model,saved_path
+        federated_logging(args, global_epoch, reduced_result, epsilon_log)   #TODO
 
-def train(models, n_epochs, dataloader_list: list, optimname, learning_rate,
-          device, logstring, no_log, no_val,train_user_groups=None, val_user_groups=None, federated_setting=None,args=None):
-    # TODO: multiprocessing
+    global_model = mf_load_model(model=global_model, path=saved_path, device=device)
+    return global_model,saved_path,[None,None,test_loader]
+
+def train_federated(models, global_epochs, data_list: list, optimname, learning_rate,
+          device, logstring, no_log, no_val,train_user_groups=None, val_user_groups=None, args=None):
     trainedmodels = []
     saved_paths = []
-
-    for i, dataloaders in enumerate(dataloader_list):
-        trainedmodel = None
-        saved_path = None
-        if not federated_setting:
-            trainedmodel, saved_path = train_single(models[i], n_epochs, dataloaders, optimname,
-                                                learning_rate, device, logstring,
-                                                no_log, no_val)
-        if federated_setting:
-            trainedmodel, saved_path = train_federated_single(models[i], args, n_epochs, dataloaders, optimname,
+    dataloader_list = []
+    for i, data in enumerate(data_list):
+        trained_global_model, saved_path, dataloader = train_federated_single(models[i], args, global_epochs, data, optimname,
                                                     learning_rate, device, logstring,
                                                     no_log, no_val, train_user_groups, val_user_groups)
-
-        trainedmodels.append(trainedmodel)
+        trainedmodels.append(trained_global_model)
         saved_paths.append(saved_path)
+        dataloader_list.append(dataloader)
 
-    return trainedmodels, saved_paths
+    return trainedmodels, saved_paths, dataloader_list
 
 
 def predict(models, dataloader_list: list, device):
@@ -242,12 +250,8 @@ def predict(models, dataloader_list: list, device):
         metric_figlist.append(metric_figs)
         metric_strlist.append(metric_strs)
 
-    reduced_result = {}
     if len(models) == 1:
-        for k, v in metric_strlist[0].items():
-            if k!='SPE' and k!='SEN':
-                reduced_result[k] = '%.3f' % v
-        # reduced_result = {k: '%.3f' % v for k, v in metric_strlist[0].items()}
+        reduced_result = {k: '%.3f' % v for k, v in metric_strlist[0].items()}
     else:
         values = np.array([[v for v in d.values()] for d in metric_strlist])
         keys = metric_strlist[0].keys()

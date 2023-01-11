@@ -1,4 +1,3 @@
-# https://github.com/WyZhuNUAA/DA-MIDL/blob/main/Net/DAMIDL.py
 import torch.nn as nn
 from collections import OrderedDict
 import torch.nn.functional as F
@@ -107,7 +106,7 @@ class DAMIDL(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
-                m.weight = nn.init.kaiming_normal(m.weight, mode='fan_out')
+                m.weight = nn.init.kaiming_normal_(m.weight, mode='fan_out')
             elif isinstance(m, nn.BatchNorm3d):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
@@ -164,6 +163,43 @@ class DAMIDL(nn.Module):
 
         return predicts, groundtruths, group_labels, val_loss
 
+    def predict_data(self, val_loader, device, dtype='float32'):
+        predicts = []
+        groundtruths = []
+        group_labels = []
+
+        with torch.no_grad():
+            self.train(False)
+            for i, data in enumerate(val_loader, 0):
+                inputs, aux_labels, labels, dis_label = data
+                inputs = inputs.to(device=device, dtype=dtype)
+                outputs = self(inputs)
+                predicts.append(outputs)
+                groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
+                group_labels.append(dis_label)
+
+        _probs = torch.cat([j[0] for j in predicts], axis=0).cpu()
+        _probs = _probs.squeeze()
+
+        # # for clf only
+        # predicts = np.array(
+        #     [np.concatenate([j[i].softmax(dim=1)[:, -1:].cpu().numpy() for j in predicts], axis=0)
+        #      for i in range(len(predicts[1]))])
+
+        predicts = np.array(
+            [np.concatenate([j[i][:, -1:].cpu().numpy() for j in predicts], axis=0)
+             for i in range(len(predicts[1]))])
+
+        predicts = predicts.transpose((1, 0, 2))
+        groundtruths = np.concatenate(groundtruths, axis=0)
+        group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
+
+        groundtruths = groundtruths[:, :, -1:]
+        predicts = predicts[:, :, -1:]
+
+        val_loss = self.criterion(_probs, torch.from_numpy(groundtruths.squeeze().astype(int)))
+
+        return predicts, groundtruths, group_labels, val_loss
 
     def fit(self, train_loader, optimizer, device, dtype):
         losses = torch.zeros(1, dtype=dtype, device=device, )

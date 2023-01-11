@@ -4,7 +4,8 @@ import pickle as pkl
 import torch
 import numpy as np
 import copy
-import nibabel as nib
+import logging
+
 
 DTYPE = torch.float32
 BASEDIR = os.path.dirname(os.path.dirname(__file__))
@@ -13,7 +14,7 @@ NUM_LMKS = 50
 VAL_R = 0.2
 TEST_R = 0.2
 DATASEED = 1234
-## optimization
+
 LR_PATIENCE = 10
 LR_MUL_FACTOR = 0.5
 
@@ -28,6 +29,26 @@ FULL_CENTER_MAT[0].append(int(np.floor((IMG_SIZE[0] - 1) / 2.0)))
 FULL_CENTER_MAT[1].append(int(np.floor((IMG_SIZE[1] - 1) / 2.0)))
 FULL_CENTER_MAT[2].append(int(np.floor((IMG_SIZE[2] - 1) / 2.0)))
 FULL_CENTER_MAT = np.array(FULL_CENTER_MAT)
+
+ADNI_PATH = '/data/datasets/ADNI/ADNI_T1_Fixed_20210719'
+AIBL_PATH = '/data/datasets/AIBL'
+COBRE_PATH = '/data/datasets/COBRE'
+
+ZIB_AD_path = '/data/datasets/Preprocessing/ZIB_AD/'
+ABIDE_T1PATH = '/data/datasets/Preprocessing/ABIDE_T1/'
+ABIDE_FMRIPATH = '/data/datasets/Preprocessing/ABIDE_fmri/'
+ATLAS_2_PATH='/data/datasets/Preprocessing/ATLAS_2'
+MINDS_PATH='/data/datasets/Preprocessing/MINDS'
+NIFD_PATH='/data/datasets/Preprocessing/NIFD_T1'
+BraTS_PATH='/data/datasets/Preprocessing/MICCAI_BraTS/MICCAI_BraTS_20'
+eQTL_filtering = 'ZIB_snp_filtered'
+eQTL_PATH = os.path.join('/data/home/zhangzc/dataset/brain_imgen/gtex_link.eqtl.filtered', eQTL_filtering)
+
+# logging.warning('GO Graph path: %s' % eQTL_PATH)
+
+# GO_GRAPH_PATH = os.getenv('GO_GRAPH_PATH', os.path.join(eQTL_PATH, 'go_graph'))
+GO_GRAPH_PATH = os.getenv('GO_GRAPH_PATH', os.path.join(eQTL_PATH, 'go_graph_flattened'))
+# logging.warning('GO Graph path: %s' % GO_GRAPH_PATH)
 
 
 def gen_center_mat(pat_size: list):
@@ -57,6 +78,7 @@ def parse_opts():
         nargs='+',
         required=False,
         help='dataset list for prediction (Optional)')
+
     parser.add_argument(
         '--label_names',
         default=['FDG', 'AV45'],
@@ -95,12 +117,14 @@ def parse_opts():
         default=16,
         type=int,
         help='Batch Size')
+
     parser.add_argument(
         '--patch_size',
         default=(25, 25, 25),
         type=int,
         nargs=3,
         help='patch size, only available for some methods')
+
     parser.add_argument(
         '--pretrain_phase',
         default=0,
@@ -121,7 +145,7 @@ def parse_opts():
         help='Specify the index of gpu')
 
     parser.add_argument(
-        '--n_epochs',
+        '--global_epochs',
         default=1,
         type=int,
         help='Number of total epochs to run')
@@ -144,6 +168,7 @@ def parse_opts():
         action='store_true',
         help='If true, validation is not performed.')
     parser.set_defaults(no_val=False)
+
     parser.add_argument(
         '--no_log',
         action='store_true',
@@ -236,7 +261,7 @@ def parse_opts():
         '--federated',
         action='store_true',
         help='federated learning')
-    parser.set_defaults(federated=False) #把action指定为’store_true‘的话，不输入’--federated‘的时候，默认为False;输入’--federated‘的时候，为True
+    parser.set_defaults(federated=False)
 
     parser.add_argument(
         '--federated_setting',
@@ -244,6 +269,20 @@ def parse_opts():
         type=str,
         help='specify federated parameters in dict form. eg: {"para1": values1}'
     )
+
+    parser.add_argument(
+        '--withDP',
+        action='store_true',
+        help='diffential privacy'
+    )
+
+    parser.add_argument(
+        '--dp_setting',
+        default=None,
+        type=str,
+        help='specify dp parameters in dict form. eg: {"para1": values1}'
+    )
+
     args = parser.parse_args()
     return args
 
@@ -251,69 +290,73 @@ def mod_opt(method, opt):
     opt = copy.copy(opt)
     opt.mask_mat = None
     opt.resample_patch = None
-    # Specify the hyper-parameters for each method
 
     if method in ['Res18', 'Res34']:
-        # opt.optimizer = 'sgd'
         opt.center_mat = FULL_CENTER_MAT
         opt.patch_size = FULL_PATCH_SIZE
         opt.method_setting = {'sample_size': opt.patch_size, 'num_classes': opt.num_classes}
-    elif method == 'LDMIL':
-        with open('./utils/DLADLMKS_%d.pkl' % opt.patch_size[0], 'rb') as f:
-            opt.center_mat, opt.patch_size, _ = pkl.load(f)
 
-        opt.center_mat = opt.center_mat[:, :NUM_LMKS]
+    elif method in ['Res18_Multimodal']:
+        opt.center_mat = FULL_CENTER_MAT
+        opt.patch_size = FULL_PATCH_SIZE
+        opt.method_setting = {'sample_size': opt.patch_size, 'num_classes': opt.num_classes}
 
-        if not opt.patch_size[0] == 25:
-            opt.resample_patch = [25, 25, 25]
-        # opt.patch_size = (25, 25, 25)
-        # opt.center_mat = LMKS_CENTER_MAT
-        opt.method_setting = {
-            'num_patch': opt.center_mat.shape[1], 'patch_size': opt.patch_size, 'inplanes': 1}
+    elif method in ['densenet121']:
+        opt.center_mat = FULL_CENTER_MAT
+        opt.patch_size = FULL_PATCH_SIZE
+        opt.method_setting = {'sample_size1': opt.patch_size[1], 'sample_size2':opt.patch_size[2],
+                              'sample_duration':opt.patch_size[0],'num_classes': opt.num_classes}
+    elif method in ['WideResNet18']:
+        opt.center_mat = FULL_CENTER_MAT
+        opt.patch_size = FULL_PATCH_SIZE
+        opt.method_setting = {'sample_size1': opt.patch_size[1], 'sample_size2':opt.patch_size[2],
+                              'sample_duration':opt.patch_size[0],'num_classes': opt.num_classes}# TODO: WideResnet18,34
+
+    elif method in ['WideResNet34']:
+        opt.center_mat = FULL_CENTER_MAT
+        opt.patch_size = FULL_PATCH_SIZE
+        opt.method_setting = {'sample_size1': opt.patch_size[1], 'sample_size2': opt.patch_size[2],
+                              'sample_duration': opt.patch_size[0], 'num_classes': opt.num_classes}
+
+    elif method in ['PreActivationResNet18','PreActivationResNet34']:
+        opt.center_mat = FULL_CENTER_MAT
+        opt.patch_size = FULL_PATCH_SIZE
+        opt.method_setting = {'sample_size1': opt.patch_size[1], 'sample_size2':opt.patch_size[2],
+                              'sample_duration':opt.patch_size[0],'num_classes': opt.num_classes}
 
     elif method == 'DAMIDL':
-        with open('/data/home/feiyl/federated/utils/DLADLMKS_%d.pkl' % opt.patch_size[0], 'rb') as f:
+        with open('/data/home/feiyl/202301/utils/DLADLMKS_%d.pkl' % opt.patch_size[0], 'rb') as f:
             opt.center_mat, opt.patch_size, _ = pkl.load(f)
-
         opt.center_mat = opt.center_mat[:, :NUM_LMKS]
         if not opt.patch_size[0] == 25:
             opt.resample_patch = [25, 25, 25]
-        # opt.optimizer = 'adam'
-        # opt.learning_rate = 0.001
         opt.method_setting = {
             'patch_num': opt.center_mat.shape[1], 'feature_depth': [32, 64, 128, 128]
         }
+
     elif method == 'ViT':
         opt.center_mat = gen_center_mat(opt.patch_size)
-
         opt.method_setting = {
             'patch_size': opt.patch_size, 'num_patches': opt.center_mat.shape[1],
             'dim': 64, 'depth': 4, 'heads': 8, 'dim_head': 64, 'mlp_dim': 4 * 64,
             'dropout': 0.1, 'emb_dropout': 0.1, 'num_classes': 1, 'pool': 'cls', 'channels': 1}
+
     else:
         raise NotImplementedError
-
     return opt
 
 def federated_opt(opt):
     opt = copy.copy(opt)
-    # opt.add_argument('--num_users', type=int, default=100,
-    #                     help="number of users: K")
-    # opt.add_argument('--frac', type=float, default=0.1,
-    #                     help='the fraction of clients: C')
-    # opt.add_argument('--local_ep', type=int, default=10,
-    #                     help="the number of local epochs: E")
-    # opt.add_argument('--local_bs', type=int, default=10,
-    #                     help="local batch size: B")
-    # opt.add_argument('--iid', type=int, default=1,
-    #                     help='Default set to IID. Set to 0 for non-IID.')
-    # opt.add_argument('--unequal', type=int, default=0,
-    #                     help='whether to use unequal data splits for  \
-    #                         non-i.i.d setting (use 0 for equal splits)')
     opt.federated_setting={
-        'num_users':5,'frac':1,'local_ep':2,
-        'local_bs':1,'iid':1,'unequal':0,'local_epoch':2
+        'num_users':10,'frac':0.5,'local_bs':1,'iid':1,'unequal':0,'local_epoch':5
     }
     return opt
     #'iid':set to 0 for non-IID
     #'unequal':set to 0 for equal splits
+
+def dp_opt(opt):
+    opt = copy.copy(opt)
+    opt.dp_setting={
+        'delta':1e-3, 'epsilon':4.0, 'max_grad_norm':2
+    }
+    return opt

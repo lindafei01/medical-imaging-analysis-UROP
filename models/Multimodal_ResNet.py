@@ -5,8 +5,7 @@ from torch.autograd import Variable
 import math
 from functools import partial
 import numpy as np
-
-
+import os
 
 
 def conv3x3x3(in_planes, out_planes, stride=1):
@@ -20,11 +19,10 @@ def conv3x3x3(in_planes, out_planes, stride=1):
         bias=False)
 
 
-class SELayer(nn.Module):
-    '''
-    https://github.com/moskomule/senet.pytorch
-    Modified
-    '''
+'''class SELayer(nn.Module):
+
+    #https://github.com/moskomule/senet.pytorch
+    #Modified
 
     def __init__(self, channel, reduction=16):
         super(SELayer, self).__init__()
@@ -35,12 +33,11 @@ class SELayer(nn.Module):
             nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
-
     def forward(self, x):
         b, c, _, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1, 1)
-        return x * y.expand_as(x)
+        return x * y.expand_as(x)'''
 
 
 def downsample_basic_block(x, planes, stride):
@@ -88,9 +85,8 @@ class BasicBlock(nn.Module):
         return out
 
 
-class SEBasicBlock(nn.Module):
+'''class SEBasicBlock(nn.Module):
     expansion = 1
-
     def __init__(self, inplanes, planes, stride=1, downsample=None):
         super(SEBasicBlock, self).__init__()
         self.conv1 = conv3x3x3(inplanes, planes, stride)
@@ -101,26 +97,19 @@ class SEBasicBlock(nn.Module):
         self.downsample = downsample
         self.stride = stride
         self.se = SELayer(planes)
-
     def forward(self, x):
         residual = x
-
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-
         out = self.conv2(out)
         out = self.bn2(out)
-
         out = self.se(out)
-
         if self.downsample is not None:
             residual = self.downsample(x)
-
         out += residual
         out = self.relu(out)
-
-        return out
+        return out'''
 
 
 class Bottleneck(nn.Module):
@@ -175,11 +164,13 @@ class ResNet(nn.Module):
     def __init__(self,
                  block,
                  layers,
+                 dropout=0.2,
                  sample_size=(121, 145, 121),
+                 aux_size=13366,  # (13366,8515,528)
+                 hidden_size=(2048, 1024, 512),
                  shortcut_type='B',
                  num_classes=400,
-                 channels=(64, 128, 256, 512),
-                 federated = None):
+                 channels=(64, 128, 256, 512)):
         self.inplanes = channels[0]
         self.num_classes = num_classes
         super(ResNet, self).__init__()
@@ -207,11 +198,16 @@ class ResNet(nn.Module):
             (last_size[0], last_size[1], last_size[2]), stride=1)
         # self.fc = nn.Linear(512 * block.expansion, num_classes)
         fc_size = channels[np.where(np.array(layers) > 0)[0][-1]]
-        self.fc = nn.Sequential(nn.Linear(fc_size * block.expansion, num_classes))
+        self.fc1 = nn.Sequential(nn.Linear(fc_size * block.expansion, fc_size * block.expansion), nn.Dropout(p=dropout))
+        self.fc2 = nn.Sequential(nn.Linear(aux_size, hidden_size[0]), nn.Dropout(p=dropout),
+                                 nn.Linear(hidden_size[0], hidden_size[1]),
+                                 nn.Linear(hidden_size[1], hidden_size[2]), nn.Dropout(p=dropout))
+        self.fc3 = nn.Sequential(nn.Linear(hidden_size[2] + fc_size * block.expansion, 256), nn.Dropout(p=dropout),
+                                 nn.Linear(256, num_classes))
 
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
-                m.weight = nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                m.weight = nn.init.kaiming_normal(m.weight, mode='fan_out')
             elif isinstance(m, nn.BatchNorm3d):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
@@ -243,7 +239,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, y):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -254,12 +250,14 @@ class ResNet(nn.Module):
         x = self.layer4(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        x = self.fc1(x)
+        y = self.fc2((np.squeeze(y) + 1) / 2)
+        x = self.fc3(torch.cat((x, y), dim=1))
         if self.num_classes == 1:
             x = torch.sigmoid(x)
         else:
             x = torch.log_softmax(x, dim=1)
-        return x, #torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+        return x,  # torch.zeros(x.shape, dtype=x.dtype, device=x.device)
 
     def embedding(self, x):
         x = self.conv1(x)
@@ -277,12 +275,13 @@ class ResNet(nn.Module):
         losses = torch.zeros(train_loader.dataset.labels.shape[1], dtype=dtype, device=device, )
         self.train(True)
         for n, data in enumerate(train_loader, 0):
-            inputs, aux_labels, labels, dis_label = data
+            inputs, aux_labels, labels, dis_labels = data
 
             inputs = inputs.to(device=device, dtype=dtype)
+            aux_labels = aux_labels.to(device=device, dtype=dtype)
             labels = labels.to(device=device, dtype=dtype)
             optimizer.zero_grad()
-            outputs = self(inputs)
+            outputs = self(inputs, aux_labels)
 
             for i in range(labels.shape[1]):
                 assert outputs[i].shape == labels[:, i, :].shape
@@ -304,7 +303,8 @@ class ResNet(nn.Module):
             for i, data in enumerate(val_loader, 0):
                 inputs, aux_labels, labels, dis_label = data
                 inputs = inputs.to(device=device, dtype=dtype)
-                outputs = self(inputs)
+                aux_labels = aux_labels.to(device=device, dtype=dtype)
+                outputs = self(inputs, aux_labels)
                 predicts.append(outputs)
                 groundtruths.append(labels.numpy())
                 group_labels.append(dis_label)
@@ -318,9 +318,9 @@ class ResNet(nn.Module):
         groundtruths = np.concatenate(groundtruths, axis=0)
         group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
 
-        # for i, standr in enumerate(val_loader.dataset.standrs):
-        #     predicts[:, i, :] = standr.unstandr(predicts[:, i, :])
-        #     groundtruths[:, i, :] = standr.unstandr(groundtruths[:, i, :])
+        '''for i, standr in enumerate(val_loader.dataset.standrs):
+            predicts[:, i, :] = standr.unstandr(predicts[:, i, :])
+            groundtruths[:, i, :] = standr.unstandr(groundtruths[:, i, :])'''
 
         groundtruths = groundtruths[:, :, -1:]
         predicts = predicts[:, :, -1:]
@@ -332,43 +332,6 @@ class ResNet(nn.Module):
 
         return predicts, groundtruths, group_labels, val_loss
 
-    def predict_data(self, val_loader, device, dtype='float32'):
-        predicts = []
-        groundtruths = []
-        group_labels = []
-
-        with torch.no_grad():
-            self.train(False)
-            for i, data in enumerate(val_loader, 0):
-                inputs, aux_labels, labels, dis_label = data
-                inputs = inputs.to(device=device, dtype=dtype)
-                outputs = self(inputs)
-                predicts.append(outputs)
-                groundtruths.append(labels.numpy())
-                group_labels.append(dis_label)
-
-        _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
-        _probs = _probs.transpose(0, 1).cpu()
-
-        predicts = np.array(
-            [np.concatenate([j[i].cpu().numpy() for j in predicts], axis=0) for i in range(len(predicts[1]))])
-        predicts = predicts.transpose((1, 0, 2))
-        groundtruths = np.concatenate(groundtruths, axis=0)
-        group_labels = np.concatenate([i.cpu().unsqueeze(-1).numpy() for i in group_labels], axis=0)
-
-        # for i, standr in enumerate(val_loader.dataset.standrs):
-        #     predicts[:, i, :] = standr.unstandr(predicts[:, i, :])
-        #     groundtruths[:, i, :] = standr.unstandr(groundtruths[:, i, :])
-
-        groundtruths = groundtruths[:, :, -1:]
-        predicts = predicts[:, :, -1:]
-
-        non_nan = [torch.from_numpy(~np.isnan(groundtruths[:, i, :])) for i in range(_probs.shape[1])]
-
-        val_loss = sum([self.criterion(_probs[:, i, :][non_nan[i]], torch.from_numpy(groundtruths[:, i, :])[non_nan[i]])
-                        for i in range(_probs.shape[1])])
-
-        return predicts, groundtruths, group_labels, val_loss
 
 def get_fine_tuning_parameters(model, ft_begin_index):
     if ft_begin_index == 0:
@@ -391,37 +354,37 @@ def get_fine_tuning_parameters(model, ft_begin_index):
     return parameters
 
 
-
-def resnet18(**kwargs):
+def resnet18_multimodal(**kwargs):
     """Constructs a ResNet-18 model.
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     return model
 
 
-def resnet34(**kwargs):
+def resnet34_multimodal(**kwargs):
     """Constructs a ResNet-34 model.
     """
     model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
     return model
 
 
-def resnet50(**kwargs):
+def resnet50_multimodal(**kwargs):
     """Constructs a ResNet-50 model.
     """
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     return model
 
 
-def resnet101(**kwargs):
+def resnet101_multimodal(**kwargs):
     """Constructs a ResNet-101 model.
     """
     model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
     return model
 
 
-
 if __name__ == "__main__":
-    i = torch.rand([2, 50, 1, 25, 25, 25], device='cpu', dtype=torch.float32)
+    i = torch.rand([16, 1, 121, 145, 121], device='cpu', dtype=torch.float32)
+    d = torch.rand([16, 13366], device='cpu', dtype=torch.float32)
     net = ResNet(BasicBlock, [1, 2, 2, 1], num_classes=1)
-    o = net(i)
+    o = net(i, d)
+    print(o)
