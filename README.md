@@ -30,6 +30,3 @@ python main.py --cuda_index 1 --method LDMIL --n_epoch 10 --trtype 5-rep --datas
 #WideResNet18
 #densenet121
 ```
-#TODO for 20230113
-data_val[data_idx]
-non-iid
