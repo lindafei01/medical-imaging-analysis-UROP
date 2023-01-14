@@ -133,7 +133,9 @@ class ViT(nn.Module):
                 groundtruths.append(labels.numpy()[:, 0, :])  # multi patch
                 group_labels.append(dis_label[:, 0])
 
-        _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))], dim=0)
+        # test1 = predicts[1]
+        _probs = torch.stack([torch.cat([j[i] for j in predicts], dim=0) for i in range(len(predicts[1]))],
+                             dim=0)
         _probs = _probs.transpose(0, 1).cpu()
 
         predicts = np.array(

@@ -91,7 +91,10 @@ def predict_epoch(global_step, val_loader, model, device, writer):
     pre[np.isnan(pre)] = 0
     prec, rec, thr = precision_recall_curve(label, pre)
     fpr, tpr, thr = roc_curve(label, pre)
-    tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    try:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    except:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label, labels=[0, 1]).ravel()
 
     metric_strs = {}
     metric_figs = {}
@@ -154,12 +157,9 @@ def average_weights(w):
         w_avg[key] = torch.div(w_avg[key], len(w))
     return w_avg
 
-def train_federated_single(global_model, args, global_epochs, data, optimname, learning_rate,
-                 device, logstring, no_log, no_val,train_user_groups,val_user_groups):
+def train_federated_single_sep(global_model, args, global_epochs, optimname, learning_rate,
+                 device, logstring, no_log, no_val, dataloader_list):
 
-    data_train, data_val, data_test = data
-    test_loader = torch.utils.data.DataLoader(data_test, batch_size=args.batch_size, shuffle=False,
-                                                num_workers=args.n_threads, pin_memory=True)
     global_model.to(device=device, dtype=DTYPE)
     saved_path = os.path.join(BASEDIR, 'saved_model', datetime.now().strftime('%b%d_%H-%M-%S') + '_' +
                               socket.gethostname() + logstring + '.pth')
@@ -175,28 +175,12 @@ def train_federated_single(global_model, args, global_epochs, data, optimname, l
         idxs_users = np.random.choice(range(args.federated_setting['num_users']), m, replace=False)
 
         for idx in idxs_users:
-            local_train_idxs = np.array([int(i) for i in train_user_groups[idx]])
-            local_val_idxs = np.array([int(i) for i in val_user_groups[idx]])
-            # local_train_loader = DataLoader(DatasetSplit(data_train,local_train_idxs),
-            #                                 batch_size=args.batch_size, shuffle=not args.no_shuffle,
-            #                                 num_workers=args.n_threads,pin_memory=True)
-            local_data_train = Patch_Data(data_train, patch_size=args.patch_size, center_mat=args.center_mat,
-                                    shift=not args.no_shift, flip_axis=args.flip_axises, resample_patch=args.resample_patch,
-                                    idx=local_train_idxs)
-            local_train_loader = torch.utils.data.DataLoader(local_data_train, batch_size=args.batch_size, shuffle=not args.no_shuffle,
-                                                     num_workers=args.n_threads, pin_memory=True)
+            local_train_loader = dataloader_list[idx][0]
+            local_val_loader = dataloader_list[idx][1]
+            local_test_loader = dataloader_list[idx][2]
 
-            # local_train_loader = DataLoader(data_train[local_train_idxs],
-            #                                  batch_size=args.batch_size, shuffle=not args.no_shuffle,
-            #                                  num_workers=args.n_threads,pin_memory=True)
-            local_data_val = Patch_Data(data_val, patch_size=args.patch_size, center_mat=args.center_mat,
-                                    shift=not args.no_shift, flip_axis=args.flip_axises, resample_patch=args.resample_patch,
-                                    idx=local_val_idxs)
-            local_val_loader = torch.utils.data.DataLoader(local_data_val, batch_size=args.batch_size, shuffle=not args.no_shuffle,
-                                                     num_workers=args.n_threads, pin_memory=True)
-            # local_val_loader = DataLoader(DatasetSplit(data_val,local_val_idxs),batch_size=args.federated_setting['fed_batch_size'],
-            #                               shuffle=False,num_workers=args.n_threads,pin_memory=True)
             local_model = copy.deepcopy(global_model)
+
             if optimname == 'sgd':
                 optimizer = optim.SGD(local_model.parameters(), lr=learning_rate, momentum=MOMENTUM,
                                       dampening=DAMPENING, weight_decay=WEIGHT_DECAY)
@@ -216,11 +200,12 @@ def train_federated_single(global_model, args, global_epochs, data, optimname, l
                     max_grad_norm=args.dp_setting['max_grad_norm']
                 )
 
-            local_dataloaders = [local_train_loader, local_val_loader, test_loader]
+            local_dataloaders = [local_train_loader, local_val_loader, local_test_loader]
             print(f'local client (idx:{idx}) is training...\r\n')
             local_model,_= train_single(local_model, args.federated_setting['local_epoch'], local_dataloaders, optimizer, learning_rate,
                  device, logstring, no_log, no_val)
             print(f'\r\nlocal client (idx:{idx}) finish!\r\n')
+
             if args.withDP:
                 epsilons[idx] = privacy_engine.get_epsilon(args.dp_setting['delta'])
 
@@ -236,25 +221,58 @@ def train_federated_single(global_model, args, global_epochs, data, optimname, l
         global_model.load_state_dict(global_weights)
         mf_save_model(global_model,saved_path, )
         print(f'global round {global_epoch+1} finishes!')
-        reduced_result, _, _ = predict([global_model], [[None,None,test_loader]], device)
+        reduced_result, _, _ = predict([global_model], [[None,None,local_test_loader]], device)
 
         federated_logging(args, global_epoch, reduced_result, epsilon_log)
 
     global_model = mf_load_model(model=global_model, path=saved_path, device=device)
-    return global_model,saved_path,[None,None,test_loader]
+    return global_model,saved_path
 
-def train_federated(models, global_epochs, data_list: list, optimname, learning_rate,
-          device, logstring, no_log, no_val,train_user_groups=None, val_user_groups=None, args=None):
+def train_federated_sep(models, global_epochs, data_list: list, optimname, learning_rate,
+          device, logstring, no_log, no_val,train_user_groups=None, val_user_groups=None, test_user_groups=None, args=None):
     trainedmodels = []
     saved_paths = []
     dataloader_list = []
-    for i, data in enumerate(data_list):
-        trained_global_model, saved_path, dataloader = train_federated_single(models[i], args, global_epochs, data, optimname,
+    data_train, data_val, data_test = data_list[0]
+
+    for idx in range(args.federated_setting['num_users']):
+        local_train_idxs = np.array([int(i) for i in train_user_groups[idx]])
+        local_val_idxs = np.array([int(i) for i in val_user_groups[idx]])
+        local_test_idxs = np.array([int(i) for i in test_user_groups[idx]])
+
+        local_data_train = Patch_Data(data_train, patch_size=args.patch_size, center_mat=args.center_mat,
+                                      shift=not args.no_shift, flip_axis=args.flip_axises,
+                                      resample_patch=args.resample_patch,
+                                      idx=local_train_idxs)
+        local_train_loader = torch.utils.data.DataLoader(local_data_train, batch_size=args.batch_size,
+                                                         shuffle=not args.no_shuffle,
+                                                         num_workers=args.n_threads, pin_memory=True)
+
+        local_data_val = Patch_Data(data_val, patch_size=args.patch_size, center_mat=args.center_mat,
+                                    shift=not args.no_shift, flip_axis=args.flip_axises,
+                                    resample_patch=args.resample_patch,
+                                    idx=local_val_idxs)
+        local_val_loader = torch.utils.data.DataLoader(local_data_val, batch_size=args.batch_size,
+                                                       shuffle=not args.no_shuffle,
+                                                       num_workers=args.n_threads, pin_memory=True)
+
+        local_data_test = Patch_Data(data_test, patch_size=args.patch_size, center_mat=args.center_mat,
+                                    shift=not args.no_shift, flip_axis=args.flip_axises,
+                                    resample_patch=args.resample_patch,
+                                    idx=local_test_idxs)
+        local_test_loader = torch.utils.data.DataLoader(local_data_test, batch_size=args.batch_size,
+                                                       shuffle=not args.no_shuffle,
+                                                       num_workers=args.n_threads, pin_memory=True)
+
+        dataloader_list.append([local_train_loader, local_val_loader, local_test_loader])
+
+    for i in range(len(data_list)):
+        trained_global_model, saved_path = train_federated_single_sep(models[i], args, global_epochs, optimname,
                                                     learning_rate, device, logstring,
-                                                    no_log, no_val, train_user_groups, val_user_groups)
+                                                    no_log, no_val, dataloader_list)
         trainedmodels.append(trained_global_model)
         saved_paths.append(saved_path)
-        dataloader_list.append(dataloader)
+
 
     return trainedmodels, saved_paths, dataloader_list
 

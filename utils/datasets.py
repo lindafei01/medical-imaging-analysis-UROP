@@ -445,7 +445,7 @@ class Dataset(object):
         return len(self.id_info)
 
 class Patch_Data(data.Dataset):
-    def __init__(self, imgdata, patch_size, center_mat, shift, flip_axis, resample_patch=None):
+    def __init__(self, imgdata, patch_size, center_mat, shift, flip_axis, resample_patch=None,idx=None):
         self.patch_size = patch_size
         self.center_mat = center_mat
         self.shift = shift
@@ -453,9 +453,13 @@ class Patch_Data(data.Dataset):
         self.imgdata = imgdata
         self.labels = imgdata.labels
         self.resample_patch = resample_patch
+        self.idx = idx
 
     def __getitem__(self, index):
-        bat_data, bat_labels, bat_aux_label, bat_dis_label = self.imgdata[index]
+        if not self.idx is None:
+            bat_data, bat_labels, bat_aux_label, bat_dis_label = self.imgdata[self.idx[index]]
+        else:
+            bat_data, bat_labels, bat_aux_label, bat_dis_label = self.imgdata[index]
         inputs, aux_labels, labels, dis_label = batch_sampling(imgs=bat_data, labels=bat_labels,
                                                                center_mat=self.center_mat,
                                                                aux_labels=bat_aux_label, dis_labels=bat_dis_label,
@@ -476,7 +480,10 @@ class Patch_Data(data.Dataset):
         return inputs.squeeze(0), aux_labels.squeeze(0), labels.squeeze(0), dis_label.squeeze(0),
 
     def __len__(self):
-        return len(self.imgdata)
+        if not self.idx is None:
+            return len(self.idx)
+        else:
+            return len(self.imgdata)
 
 def train_test_nooverlap(data_size, test_size, id_info, seed=None, stratify=None):
     test = []
@@ -985,7 +992,7 @@ class MINDS(Dataset):
 
     @staticmethod
     def dx_mapping(dx, clfsetting):
-        if clfsetting == 'STROKE-CONTROL':
+        if clfsetting == 'DIS-CONTROL':
             labels = map(lambda x: {'Healthy Control': 0, 'Bipolar Disorder': 1,'Major Depressive Disorder':1,'Schizophrenia':1}[x], dx)
             labels = np.array(list(labels), dtype=int)
 

@@ -47,7 +47,7 @@ if __name__ == "__main__":
     ## generate datasets
     print('Training Dataset: ', opt.dataset)
     if opt.federated:
-        data_list, train_user_groups, val_user_groups = get_dataset_federated(dataset=opt.dataset,
+        data_list, train_user_groups, val_user_groups, _ = get_dataset_federated(dataset=opt.dataset,
                                                                           clfsetting=opt.clfsetting, modals=opt.modals,
                                                                           patch_size=opt.patch_size, batch_size=opt.batch_size,
                                                                           center_mat=opt.center_mat, flip_axises=opt.flip_axises,
@@ -130,6 +130,7 @@ if __name__ == "__main__":
                                     train_user_groups=train_user_groups,
                                     val_user_groups=val_user_groups,
                                     args=opt)
+
         else:
             models, saved_paths = train(models, opt.global_epochs,
                                     dataloader_list,
