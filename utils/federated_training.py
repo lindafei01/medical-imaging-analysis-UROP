@@ -91,7 +91,10 @@ def predict_epoch(global_step, val_loader, model, device, writer):
     pre[np.isnan(pre)] = 0
     prec, rec, thr = precision_recall_curve(label, pre)
     fpr, tpr, thr = roc_curve(label, pre)
-    tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    try:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    except:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label, labels=[0,1]).ravel()
 
     metric_strs = {}
     metric_figs = {}

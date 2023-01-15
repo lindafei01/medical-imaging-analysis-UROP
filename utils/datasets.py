@@ -830,6 +830,54 @@ class ABIDE(Dataset):
 
         return labels
 
+class COBRE(Dataset):
+    def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
+                 ids_exclude=(), ids_include=(), maskmat=None, seed=1234, preload=True, dsettings=None):
+        image_path = COBRE_PATH
+        super(COBRE, self).__init__(image_path, subset, clfsetting, modals, no_smooth=no_smooth,
+                                    only_bl=only_bl, ids_exclude=ids_exclude, ids_include=ids_include,
+                                    maskmat=maskmat, seed=seed, preload=preload, dsettings={})
+
+    def get_table(self, path, modals: Union[list, str], dsettings):
+        if not isinstance(modals, list):
+            modals = [modals]
+
+        info = pd.read_csv(os.path.join(path, 'COBRE/participants.tsv'), sep='\t', dtype=str)
+        info = info.rename(columns={'participant_id': 'ID', 'dx': 'DX', 'age': 'AGE', 'sex': 'GENDER'})
+        info['VISIT'] = 0
+
+        for sub in info['ID']:
+            for modal in modals[:1]:  # TODO@ZZC(20220721): for other modalities
+                subj_path = os.path.join(path, 'COBRE_pred', 'sub-' + sub)
+                img_path = self.check_imgpath(subj_path=subj_path, modal=modal)
+                if img_path is not None:
+                    info.loc[info['ID'] == sub, modal] = img_path
+
+        return info
+
+    @staticmethod
+    def _filtering(info: pd.DataFrame):
+        subs = []
+        for sub in info['ID']:
+            if (info.loc[info['ID'] == sub, 'DX'] == 'Schizophrenia_Strict').all():
+                subs.append(sub)
+            elif (info.loc[info['ID'] == sub, 'DX'] == 'No_Known_Disorder').all():
+                subs.append(sub)
+        return subs
+
+    @staticmethod
+    def dx_mapping(dx, clfsetting):
+        if clfsetting == 'SCZ-NC':
+            labels = map(lambda x: {'No_Known_Disorder': 0, 'Schizophrenia_Strict': 1}[x], dx)
+            labels = np.array(list(labels), dtype=int)
+
+        elif clfsetting == 'DIS-NC':
+            labels = map(lambda x: {'No_Known_Disorder': 0, 'Schizophrenia_Strict': 1}[x], dx)
+            labels = np.array(list(labels), dtype=int)
+        else:
+            raise NotImplementedError
+
+        return labels
 
 # class ABIDE(Dataset):
 #     def __init__(self, subset, clfsetting, modals, no_smooth=False, only_bl=False,
@@ -1222,6 +1270,14 @@ def get_dataset(dataset, clfsetting, modals, patch_size, batch_size, center_mat,
         data_test = ADNI(subset=['testing'], clfsetting=clfsetting, modals=modals,
                          no_smooth=no_smooth, seed=seed, only_bl=True,
                          dsettings={'cohort': 'ALL', 'label_names': ['DX']})
+
+    elif dataset == 'COBRE':
+        data_train = COBRE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                          seed=seed, only_bl=False)
+        data_val = COBRE(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                        seed=seed, only_bl=True)
+        data_test = COBRE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                         seed=seed, only_bl=True)
 
     elif dataset == 'AIBL':
         data_train = AIBL(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,

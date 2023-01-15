@@ -114,7 +114,7 @@ def parse_opts():
     )
     parser.add_argument(
         '--batch_size',
-        default=9,
+        default=5,
         type=int,
         help='Batch Size')
 
@@ -348,7 +348,7 @@ def mod_opt(method, opt):
 def federated_opt(opt):
     opt = copy.copy(opt)
     opt.federated_setting={
-        'num_users':2,'frac':0.5,'local_bs':1,'iid':0,'unequal':1,'local_epoch':1, 'fed_batch_size':1, 'seperate_test_data':1
+        'num_users':4,'frac':0.5,'local_bs':1,'iid':0,'unequal':1,'local_epoch':5, 'fed_batch_size':1, 'seperate_test_data':1
     }
     return opt
     #'iid':set to 0 for non-IID

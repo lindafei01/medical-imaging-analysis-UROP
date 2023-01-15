@@ -117,13 +117,18 @@ def client_iid_unequal(data, num_users):
 
 def client_noniid_unequal(data, num_users):
     divisors = list(divisorGenerator(len(data)))
-    if len(divisors) % 2 == 0:
-        mid_idx = int((len(divisors) - 1) / 2)
+    if len(divisors) == 2:
+        num_shards = int(math.sqrt(len(data)))
+        num_imgs = int(len(data) // num_shards)
     else:
-        mid_idx = int(len(divisors) / 2 - 1)
-    num_shards, num_imgs = int(divisors[mid_idx]), int(len(data) // divisors[mid_idx])
+        if len(divisors) % 2 == 0:
+            mid_idx = int((len(divisors) - 1) / 2)
+        else:
+            mid_idx = int(len(divisors) / 2 - 1)
 
-    idx_shard = [i for i in range(num_shards)]  #[0,1,2,....1199]
+        num_shards, num_imgs = int(divisors[mid_idx]), int(len(data) // divisors[mid_idx])
+
+    idx_shard = [i for i in range(num_shards)]
     dict_users = {i: np.array([]) for i in range(num_users)}
     idxs = np.arange(num_shards*num_imgs)
     labels = data.labels[:num_shards*num_imgs].squeeze()
@@ -330,6 +335,13 @@ def get_dataset_federated(dataset, clfsetting, modals, patch_size, batch_size, c
         data_test = NIFD(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
                           seed=seed, only_bl=True)
 
+    elif dataset == 'COBRE':
+        data_train = COBRE(subset=['training'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                           seed=seed, only_bl=True)
+        data_val = COBRE(subset=['validation'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                         seed=seed, only_bl=True)
+        data_test = COBRE(subset=['testing'], clfsetting=clfsetting, modals=modals, no_smooth=no_smooth,
+                          seed=seed, only_bl=True)
     else:
         raise NotImplementedError
 

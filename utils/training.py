@@ -18,6 +18,8 @@ from typing import Union
 from torch.utils.data import DataLoader
 from .federated_datasets import DatasetSplit
 from opacus import PrivacyEngine
+import csv
+from quality_control.process_quality import *
 
 method_map = {'Res18': resnet18, 'Res34': resnet34, 'DAMIDL': DAMIDL, 'ViT': ViT}
 
@@ -51,7 +53,10 @@ def validate_epoch(global_step, val_loader, model, device, writer):
     pre[np.isnan(pre)] = 0
     prec, rec, thr = precision_recall_curve(label, pre)
     fpr, tpr, thr = roc_curve(label, pre)
-    tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    try:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label).ravel()
+    except:
+        tn, fp, fn, tp = confusion_matrix(y_pred=pre.round(), y_true=label,labels=[0,1]).ravel()
 
     metric_strs = {}
     metric_figs = {}
@@ -86,6 +91,20 @@ def predict_epoch(global_step, val_loader, model, device, writer):
     # monitor the performance for every subject
     pre, label, val_loss = evaluation(model=model, val_loader=val_loader)
     pre[np.isnan(pre)] = 0
+    # y_pred = pre.round()
+    # y_true = label
+    # predict_quality = (y_pred == y_true)
+    # log_path = '/data/home/feiyl/UROP/quality_control/quality_control.csv'
+    # file = open(log_path, 'a+', encoding='utf-8', newline='')
+    # csv_writer = csv.writer(file)
+    # csv_writer.writerow(['img_path', 'prediction(True for truth, False for error)', 'IQR', 'rank'])
+    # for i in range(len(val_loader.dataset)):
+    #     img_path = val_loader.dataset.imgdata.namelist[i]
+    #     process_quality = retrieve_COBRE_quality(img_path)
+    #     csv_writer.writerow([val_loader.dataset.imgdata.namelist[i], predict_quality.squeeze()[i],
+    #                          process_quality[0], process_quality[1]]) #TODO
+    # file.close()
+
     prec, rec, thr = precision_recall_curve(label, pre)
     fpr, tpr, thr = roc_curve(label, pre)
     try:
